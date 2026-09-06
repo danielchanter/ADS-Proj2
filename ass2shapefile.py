@@ -8,22 +8,29 @@ url = "https://www.abs.gov.au/statistics/standards/australian-statistical-geogra
 
 zip_path = "data/SA2_2026.zip"
 extract_path = "data/SA2_2026"
+shp_path = f"{extract_path}/SA2_2026_AUST_GDA2020.shp"
 
-# Make data folder and download:
+# Make data folder and download (skip if we already have it):
 os.makedirs("data", exist_ok=True)
-response = requests.get(url)
-response.raise_for_status()
 
-with open(zip_path, "wb") as file:
-    file.write(response.content)
+if not os.path.exists(zip_path):
+    print("Downloading SA2 boundaries (~50MB)...")
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
 
-with zipfile.ZipFile(zip_path, "r") as zip_ref:
-    zip_ref.extractall(extract_path)
+    with open(zip_path, "wb") as file:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            file.write(chunk)
+else:
+    print(f"Using existing {zip_path}")
+
+if not os.path.exists(shp_path):
+    print("Extracting...")
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        zip_ref.extractall(extract_path)
 
 # Load shapefile
-sa2 = gpd.read_file(
-    f"{extract_path}/SA2_2026_AUST_GDA2020.shp"
-)
+sa2 = gpd.read_file(shp_path)
 
 # Victoria only
 vic_sa2 = sa2[sa2["STE_CODE26"] == "2"]
