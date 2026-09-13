@@ -1,0 +1,18 @@
+# Downloaded datasets — fetched by the download scripts, never committed
+data/
+
+# Archives
+*.zip
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS cruft
+.DS_Store
+Thumbs.db
