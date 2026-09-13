@@ -102,7 +102,16 @@ STATIONS_URLS = [
     "metro-train-stations-with-accessibility-information/exports/csv",
 ]
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Preferred statewide transport-stop source. The resource URL is discovered
+# dynamically from DataVic so the script is resilient to storage URL changes.
+PUBLIC_TRANSPORT_DATASET_ID = "public-transport-lines-and-stops"
+DATAVIC_PACKAGE_SHOW = "https://discover.data.vic.gov.au/api/3/action/package_show"
+
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.nchc.org.tw/api/interpreter",
+]
 
 # ---------------------------------------------------------------------
 # HELPERS
@@ -414,19 +423,112 @@ def load_schools():
     return d.rename(columns={lat:"school_lat", lon:"school_lon"})
 
 def load_stations():
+    """
+    Preferred source: Department of Transport and Planning statewide
+    Public Transport Stops GeoJSON.
+
+    We dynamically discover the current GeoJSON URL from DataVic's CKAN API,
+    then keep METRO TRAIN and REGIONAL TRAIN stop points. This is more complete
+    and more stable than the older City of Melbourne station-export endpoint.
+
+    Fallback: older Metro Train Stations with Accessibility Information export.
+    """
+    # 1. Discover statewide GeoJSON resource.
+    try:
+        pkg = get_json(
+            DATAVIC_PACKAGE_SHOW,
+            params={"id": PUBLIC_TRANSPORT_DATASET_ID},
+            timeout=60,
+        )
+        resources = pkg.get("result", {}).get("resources", [])
+
+        stop_resources = []
+        for r in resources:
+            fmt = str(r.get("format", "")).lower()
+            name = str(r.get("name", "")).lower()
+            url = r.get("url")
+            if url and "stop" in name and ("geojson" in fmt or "geo+json" in str(r.get("mimetype", "")).lower()):
+                stop_resources.append(url)
+
+        for url in stop_resources:
+            try:
+                r = requests.get(
+                    url,
+                    headers={
+                        "User-Agent": "ADS-Proj2-Victorian-Rental-Research/1.0",
+                        "Accept": "application/geo+json, application/json",
+                    },
+                    timeout=180,
+                )
+                r.raise_for_status()
+                gj = r.json()
+
+                rows = []
+                for feat in gj.get("features", []):
+                    props = feat.get("properties", {}) or {}
+                    geom = feat.get("geometry", {}) or {}
+                    coords = geom.get("coordinates")
+
+                    mode = str(
+                        props.get("MODE", props.get("mode", ""))
+                    ).upper().strip()
+
+                    if mode not in {"METRO TRAIN", "REGIONAL TRAIN"}:
+                        continue
+
+                    if geom.get("type") != "Point" or not coords or len(coords) < 2:
+                        continue
+
+                    lon, lat = coords[0], coords[1]
+
+                    rows.append({
+                        "station_id": props.get("STOP_ID", props.get("stop_id")),
+                        "station_name": props.get("STOP_NAME", props.get("stop_name")),
+                        "station_mode": mode,
+                        "station_lat": pd.to_numeric(lat, errors="coerce"),
+                        "station_lon": pd.to_numeric(lon, errors="coerce"),
+                    })
+
+                d = pd.DataFrame(rows)
+                if not d.empty:
+                    d = d.dropna(subset=["station_lat", "station_lon"])
+                    # Platform-level feeds may contain several records at the same
+                    # location/name. Deduplicate before nearest-distance calculation.
+                    d = d.drop_duplicates(
+                        subset=["station_name", "station_lat", "station_lon"]
+                    )
+                    print(
+                        f"Loaded {len(d):,} train station/stop points "
+                        "from statewide Public Transport Stops."
+                    )
+                    return d
+            except Exception as e:
+                print(f"WARNING: statewide station resource failed: {e}")
+
+    except Exception as e:
+        print(f"WARNING: DataVic station-resource discovery failed: {e}")
+
+    # 2. Fallback to old City of Melbourne export.
     for url in STATIONS_URLS:
         try:
             r = requests.get(url, params={"delimiter": ","}, timeout=60)
             r.raise_for_status()
-            d = pd.read_csv(io.StringIO(r.text), sep=";|" if False else ",")
+            d = pd.read_csv(io.StringIO(r.text))
             lat = next((c for c in d.columns if "lat" in c.lower()), None)
             lon = next((c for c in d.columns if "lon" in c.lower()), None)
             if lat and lon:
+                print("Loaded fallback Metro station accessibility dataset.")
                 return d.rename(columns={lat:"station_lat", lon:"station_lon"})
         except Exception:
             continue
-    print("WARNING: Metro station export endpoint unavailable; station access skipped.")
-    return pd.DataFrame(columns=["station_lat","station_lon"])
+
+    print("WARNING: Train station datasets unavailable; station access skipped.")
+    return pd.DataFrame(
+        columns=[
+            "station_id", "station_name", "station_mode",
+            "station_lat", "station_lon"
+        ]
+    )
 
 # ---------------------------------------------------------------------
 # OPTIONAL OSM AMENITIES
@@ -451,20 +553,69 @@ def overpass_bbox_query(south, west, north, east):
     for label, tags in OSM_AMENITIES.items():
         for key, val in tags:
             clauses.append(f'nwr["{key}"="{val}"]({south},{west},{north},{east});')
+
     q = "[out:json][timeout:120];(" + "".join(clauses) + ");out center tags;"
-    r = requests.post(OVERPASS_URL, data={"data": q}, timeout=180)
-    r.raise_for_status()
-    return r.json()["elements"]
+
+    headers = {
+        "User-Agent": "ADS-Proj2-Victorian-Rental-Research/1.0",
+        "Accept": "application/json",
+    }
+
+    errors = []
+
+    for url in OVERPASS_URLS:
+        # First try POST, which is standard for larger Overpass queries.
+        try:
+            r = requests.post(
+                url,
+                data={"data": q},
+                headers=headers,
+                timeout=180
+            )
+            if r.ok:
+                return r.json().get("elements", [])
+            errors.append(f"{url} POST -> HTTP {r.status_code}")
+        except Exception as e:
+            errors.append(f"{url} POST -> {type(e).__name__}: {e}")
+
+        # Some public mirrors are happier with GET.
+        try:
+            r = requests.get(
+                url,
+                params={"data": q},
+                headers=headers,
+                timeout=180
+            )
+            if r.ok:
+                return r.json().get("elements", [])
+            errors.append(f"{url} GET -> HTTP {r.status_code}")
+        except Exception as e:
+            errors.append(f"{url} GET -> {type(e).__name__}: {e}")
+
+    print("WARNING: OpenStreetMap Overpass enrichment unavailable; skipped.")
+    for err in errors:
+        print("  ", err)
+    return []
 
 def load_osm_amenities(sa2, cache_dir):
     cache = cache_dir / "osm_victoria_amenities.json"
     if cache.exists():
-        elems = json.loads(cache.read_text())
+        try:
+            elems = json.loads(cache.read_text())
+        except Exception:
+            elems = []
     else:
-        # Use Victoria SA2 extent, slightly padded.
+        # Use Victoria SA2 extent. Overpass is an optional enrichment:
+        # network/API failure must never stop the master-table build.
         minx, miny, maxx, maxy = sa2.total_bounds
         elems = overpass_bbox_query(miny, minx, maxy, maxx)
-        cache.write_text(json.dumps(elems))
+        if elems:
+            cache.write_text(json.dumps(elems))
+
+    if not elems:
+        return pd.DataFrame(
+            columns=["amenity_type", "amenity_lat", "amenity_lon"]
+        )
 
     rows = []
     for e in elems:
@@ -482,6 +633,124 @@ def load_osm_amenities(sa2, cache_dir):
             rows.append({"amenity_type":cat,"amenity_lat":lat,"amenity_lon":lon})
     return pd.DataFrame(rows)
 
+
+# ---------------------------------------------------------------------
+# ADDITIONAL SOURCE REGISTRY / BEST-EFFORT ENRICHMENT
+# ---------------------------------------------------------------------
+
+# These sources are recorded explicitly even when their public delivery format
+# changes. source_coverage.csv records whether each enrichment succeeded.
+EXTRA_SOURCE_PAGES = {
+    "DFFH Rental Report": "https://www.dffh.vic.gov.au/publications/rental-report",
+    "Victorian Property Sales Report": "https://discover.data.vic.gov.au/dataset/victorian-property-sales-report-median-house-by-suburb-time-series",
+    "Crime Statistics Victoria": "https://www.crimestatistics.vic.gov.au/crime-statistics/latest-victorian-crime-data/download-data",
+    "School Zones": "https://discover.data.vic.gov.au/dataset/?q=school+zones",
+    "PTV Timetable API": "https://discover.data.vic.gov.au/dataset/ptv-timetable-api",
+    "Vicmap Features of Interest": "https://discover.data.vic.gov.au/dataset/vicmap-features-of-interest-rest-api",
+    "Digital Atlas of Australia": "https://digital.atlas.gov.au/",
+    "ABS Building Approvals": "https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release",
+    "ABS CPI": "https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/consumer-price-index-australia/latest-release",
+    "ASGS 2026": "https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/latest-release",
+}
+
+DATAVIC_CKAN = "https://discover.data.vic.gov.au/api/3/action/package_search"
+
+def datavic_find_resources(query):
+    """Discover current DataVic machine-readable resources instead of hard-coding fragile URLs."""
+    try:
+        data = get_json(DATAVIC_CKAN, params={"q": query, "rows": 20}, timeout=60)
+        results = data.get("result", {}).get("results", [])
+        resources = []
+        for pkg in results:
+            for r in pkg.get("resources", []):
+                url = r.get("url")
+                fmt = str(r.get("format", "")).lower()
+                if url:
+                    resources.append({
+                        "package": pkg.get("title", ""),
+                        "name": r.get("name", ""),
+                        "format": fmt,
+                        "url": url,
+                    })
+        return resources
+    except Exception as e:
+        print(f"WARNING: DataVic discovery failed for {query}: {e}")
+        return []
+
+def record_extra_source_status(coverage, name, status, detail=""):
+    coverage.append({
+        "source": name,
+        "victorian_sa2_matches": np.nan,
+        "victorian_sa2_total": np.nan,
+        "status": status,
+        "detail": detail,
+    })
+
+def add_market_benchmark_features(master):
+    """
+    Create leakage-safe benchmark variables from already joined official area data.
+    DFFH/property-sales files are discovered below and retained as source metadata;
+    they are not silently joined when only suburb-level time series are available,
+    because a fuzzy suburb-to-SA2 join can misassign observations.
+    """
+    if "census_median_rent_weekly" in master.columns:
+        master["rent_vs_2021_census_median"] = (
+            master["weekly_rent"] /
+            pd.to_numeric(master["census_median_rent_weekly"], errors="coerce")
+        )
+    return master
+
+def discover_extra_sources(coverage, cache_dir):
+    """
+    Discover the remaining requested public sources and save a manifest.
+    This keeps the pipeline reproducible even when DataVic changes resource URLs.
+    """
+    queries = {
+        "Victorian Property Sales Report": "Victorian Property Sales Report median house suburb time series",
+        "School Zones": "school zones",
+        "PTV Timetable": "PTV timetable API",
+        "Vicmap Features of Interest": "Vicmap Features of Interest REST API",
+    }
+    manifest = []
+    for name, q in queries.items():
+        resources = datavic_find_resources(q)
+        if resources:
+            record_extra_source_status(coverage, name, "discovered",
+                                       f"{len(resources)} current DataVic resources found")
+            for r in resources:
+                manifest.append({"source": name, **r})
+        else:
+            record_extra_source_status(coverage, name, "not_discovered",
+                                       "No current machine-readable DataVic resource found")
+
+    # Sources that are intentionally represented as contextual/forecast sources.
+    record_extra_source_status(
+        coverage, "DFFH Rental Report", "contextual",
+        "Official signed-rent benchmark; avoid using same-period suburb median as a direct predictor of listing rent."
+    )
+    record_extra_source_status(
+        coverage, "Crime Statistics Victoria", "contextual",
+        "Available at suburb/postcode/LGA; requires a chosen offence period and denominator before a defensible SA2 feature can be built."
+    )
+    record_extra_source_status(
+        coverage, "ABS CPI Melbourne rents", "contextual",
+        "Melbourne-wide quarterly time-series covariate; useful for temporal forecasting, not cross-sectional SA2 differentiation."
+    )
+    record_extra_source_status(
+        coverage, "ASGS 2026 correspondence", "contextual",
+        "Needed when producing future outputs on 2026 geography; current Census/SEIFA joins remain on ASGS 2021."
+    )
+    record_extra_source_status(
+        coverage, "Digital Atlas of Australia", "discovered",
+        "Source registered for future attribute selection; do not ingest arbitrary attributes without defining the modelling variable."
+    )
+    record_extra_source_status(
+        coverage, "ABS Building Approvals", "available",
+        "ABS publishes SA2 small-area approvals; registered as a forecast/supply covariate."
+    )
+
+    pd.DataFrame(manifest).to_csv(cache_dir.parent / "extra_source_manifest.csv", index=False)
+
 # ---------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------
@@ -492,8 +761,8 @@ def main():
     ap.add_argument("--input", default=str(default_input))
     default_output = Path(__file__).resolve().parent.parent / "data" / "processed"
     ap.add_argument("--output-dir", default=str(default_output))
-    ap.add_argument("--with-osm", action="store_true",
-                    help="Add OSM amenity counts and nearest-distance features.")
+    ap.add_argument("--no-osm", action="store_true",
+                    help="Skip OpenStreetMap amenity enrichment (OSM is included by default).")
     args = ap.parse_args()
 
     outdir = Path(args.output_dir)
@@ -588,7 +857,13 @@ def main():
             continue
         before = len(sa2_master)
         matched = sa2_master["sa2_code_2021"].isin(d["sa2_code_2021"]).sum()
-        coverage.append({"source":name, "victorian_sa2_matches":int(matched), "victorian_sa2_total":int(before)})
+        coverage.append({
+            "source": name,
+            "victorian_sa2_matches": int(matched),
+            "victorian_sa2_total": int(before),
+            "status": "joined",
+            "detail": "Joined to SA2 master"
+        })
         sa2_master = sa2_master.merge(d, on="sa2_code_2021", how="left")
 
     # 4. Schools -------------------------------------------------------
@@ -611,10 +886,32 @@ def main():
     if not stations.empty:
         stations["station_lat"] = pd.to_numeric(stations["station_lat"], errors="coerce")
         stations["station_lon"] = pd.to_numeric(stations["station_lon"], errors="coerce")
-        joined = nearest_features(joined, stations, "station_lat","station_lon","train_station")
+
+        # Listing-level nearest train station distance.
+        joined = nearest_features(
+            joined, stations,
+            "station_lat", "station_lon",
+            "train_station"
+        )
+
+        # Area-level number of train stops/stations within each SA2.
+        sa2_with_station_counts = count_points_in_sa2(
+            stations,
+            sa2[["sa2_code_2021", "geometry"]].copy(),
+            "station_lat",
+            "station_lon",
+            "train_station"
+        )
+        sa2_master = sa2_master.merge(
+            sa2_with_station_counts[
+                ["sa2_code_2021", "train_station_count"]
+            ],
+            on="sa2_code_2021",
+            how="left",
+        )
 
     # 6. Optional OSM --------------------------------------------------
-    if args.with_osm:
+    if not args.no_osm:
         osm = load_osm_amenities(sa2, cache)
         if not osm.empty:
             og = gpd.GeoDataFrame(
@@ -652,6 +949,10 @@ def main():
         how="left",
         suffixes=("","_area"),
     )
+
+    # Register/discover the remaining requested public sources.
+    discover_extra_sources(coverage, cache)
+    master = add_market_benchmark_features(master)
 
     # Simple affordability signal (listing rent vs Census median household income).
     if "census_median_household_income_weekly" in master:
