@@ -5,13 +5,23 @@ raw Domain rental listings.
 
 ## Run
 
+The raw Domain listings must first be placed at `sprint_2/data/raw/vic_rentals_all.csv`
+(course data from Canvas; it is not committed).
+
 From the repository root:
 
 ```bash
+# macOS / Linux
 source .venv/bin/activate
+# Windows (PowerShell):  .venv\Scripts\Activate.ps1
+
 pip install -r sprint_2/requirements.txt
 python sprint_2/run/run.py
 ```
+
+After each run, check `data/processed/source_coverage.csv`: any core source
+with `status = FAILED` (fewer than 90% of Victorian SA2s matched) or any
+"column check" row means a loader silently returned nothing.
 
 OpenStreetMap amenities are now included by default. If Overpass is unavailable
 or you need a quick run:
@@ -90,8 +100,13 @@ The pipeline filters the stop data to:
 - `METRO TRAIN`
 - `REGIONAL TRAIN`
 
+The stop feed also contains Park & Ride, Bike & Ride, Taxi Zone and lift points,
+rail-replacement bus stops and street names. These are removed, and the several
+platform-level points per station are collapsed to one, leaving about 320 stations
+(about 227 metro and 93 regional).
+
 It adds:
-- `nearest_train_station_km` for each rental listing
-- `train_station_count` for the listing's SA2
+- `nearest_train_station_km` for each rental listing (straight-line distance)
+- `train_station_count` for the listing's SA2 (number of stations)
 
 The older Metro Train Stations accessibility dataset is only used as a fallback.

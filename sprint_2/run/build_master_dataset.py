@@ -49,8 +49,14 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import requests
+from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
+
+# A core SA2 source joining fewer than this share of Victorian SA2s is
+# reported as FAILED in source_coverage.csv (a few SA2s legitimately have no
+# population, e.g. "No usual address", so 100% is not expected).
+MIN_SA2_MATCH_RATE = 0.90
 
 # ---------------------------------------------------------------------
 # VERIFIED PUBLIC SOURCES
@@ -313,56 +319,47 @@ def load_vif(cache_dir: Path):
         r.raise_for_status()
         path.write_bytes(r.content)
 
-    xls = pd.ExcelFile(path)
-    frames = []
-    for s in xls.sheet_names:
-        raw = pd.read_excel(path, sheet_name=s, header=None)
-        # Find a row containing SA2/code and projection years.
-        header_i = None
-        for i in range(min(len(raw), 30)):
-            # Convert every cell safely to text before searching.
-            vals = [str(x).lower() if pd.notna(x) else "" for x in raw.iloc[i].tolist()]
-            if any("sa2" in x for x in vals) and any("2036" in x for x in vals):
-                header_i = i
-                break
-        if header_i is None:
-            continue
-        d = pd.read_excel(path, sheet_name=s, header=header_i)
-        frames.append(d)
+    # Only the Total_Population sheet is used. Reading every sheet pulled in the
+    # Contents/Explanatory Notes sheets, whose title column ("...to_2036_(Release_2)")
+    # was substring-matched as the 2036 column, leaving 2036 and growth all-NaN.
+    sheet = "Total_Population"
+    if sheet not in pd.ExcelFile(path).sheet_names:
+        print(f"WARNING: VIF sheet {sheet!r} not found; VIF columns skipped.")
+        return pd.DataFrame(columns=["sa2_code_2021"])
 
-    if not frames:
+    raw = pd.read_excel(path, sheet_name=sheet, header=None)
+    header_i = next(
+        (i for i in range(min(len(raw), 30))
+         if (pd.to_numeric(raw.iloc[i], errors="coerce") == 2036).any()),
+        None,
+    )
+    if header_i is None:
         print("WARNING: VIF workbook layout not recognised; VIF columns skipped.")
         return pd.DataFrame(columns=["sa2_code_2021"])
 
-    d = pd.concat(frames, ignore_index=True, sort=False)
-    code = next((c for c in d.columns if "sa2" in str(c).lower() and "code" in str(c).lower()), None)
+    d = pd.read_excel(path, sheet_name=sheet, header=header_i)
+    d.columns = [str(c).strip() for c in d.columns]
+    code = next((c for c in d.columns if "sa2" in c.lower() and "code" in c.lower()), None)
     if code is None:
         print("WARNING: VIF SA2 code column not found.")
         return pd.DataFrame(columns=["sa2_code_2021"])
 
     d["sa2_code_2021"] = normalize_code(d[code])
-    d = d[d["sa2_code_2021"].str.startswith("2")].copy()
+    d = d[d["sa2_code_2021"].str.fullmatch(r"2\d{8}")].copy()
 
-    def year_col(year):
-        for c in d.columns:
-            if str(year) == str(c).strip() or str(year) in str(c):
-                return c
-        return None
-
-    c2026, c2031, c2036 = year_col(2026), year_col(2031), year_col(2036)
     out = d[["sa2_code_2021"]].drop_duplicates().copy()
+    for year in ("2021", "2026", "2031", "2036"):
+        if year in d.columns:
+            out[f"vif_population_{year}"] = pd.to_numeric(d[year], errors="coerce").to_numpy()
 
-    # Prefer total population/dwelling/household fields if repeated years exist.
-    # We select numeric year-labelled columns only if there is one obvious set.
-    for year, col in [(2026,c2026),(2031,c2031),(2036,c2036)]:
-        if col:
-            out[f"vif_population_{year}"] = pd.to_numeric(d[col], errors="coerce").groupby(d["sa2_code_2021"]).transform("max")
-    out = out.groupby("sa2_code_2021", as_index=False).max(numeric_only=True)
+    def growth(a, b):
+        # Zero-population SA2s (e.g. national parks) give NaN, not inf.
+        return 100 * (out[f"vif_population_{b}"] / out[f"vif_population_{a}"].replace(0, np.nan) - 1)
 
-    if "vif_population_2026" in out and "vif_population_2036" in out:
-        out["vif_population_growth_pct_2026_36"] = 100 * (
-            out["vif_population_2036"] / out["vif_population_2026"] - 1
-        )
+    if {"vif_population_2021", "vif_population_2026"} <= set(out.columns):
+        out["vif_population_growth_pct_2021_26"] = growth("2021", "2026")
+    if {"vif_population_2026", "vif_population_2036"} <= set(out.columns):
+        out["vif_population_growth_pct_2026_36"] = growth("2026", "2036")
     return out
 
 def load_personal_income(cache_dir: Path):
@@ -376,37 +373,36 @@ def load_personal_income(cache_dir: Path):
         r.raise_for_status()
         path.write_bytes(r.content)
 
+    # The SA2 sheet (Table 1.4) has a two-row header: measure names ("Median ($)")
+    # sit one row above the row holding "SA2", "SA2 NAME" and the years, so the
+    # two rows are combined. All five years (2018-19 to 2022-23) are kept so the
+    # income series can be used over time, not just as a single cross-section.
+    measures = {
+        "Earners (persons)": "tax_income_earners",
+        "Median ($)": "tax_median_total_personal_income",
+        "Mean ($)": "tax_mean_total_personal_income",
+    }
     xls = pd.ExcelFile(path)
     for s in xls.sheet_names:
         raw = pd.read_excel(path, sheet_name=s, header=None)
-        text = " ".join(raw.head(15).astype(str).fillna("").values.ravel()).lower()
-        if "sa2" not in text and "statistical area level 2" not in text:
+        hits = raw.index[raw[0].astype(str).str.strip().eq("SA2")]
+        if len(hits) == 0 or hits[0] == 0:
             continue
+        hdr = hits[0]
 
-        # Locate a row that appears to be the header.
-        for i in range(min(len(raw), 25)):
-            vals = [str(x).lower() for x in raw.iloc[i].tolist()]
-            if any("sa2" in x for x in vals) and any("median" in x for x in vals):
-                d = pd.read_excel(path, sheet_name=s, header=i)
-                code = next((c for c in d.columns if "sa2" in str(c).lower() and "code" in str(c).lower()), None)
-                if code is None:
-                    continue
-                d["sa2_code_2021"] = normalize_code(d[code])
-                d = d[d["sa2_code_2021"].str.startswith("2")].copy()
+        measure = raw.iloc[hdr - 1].ffill()
+        year = raw.iloc[hdr].astype(str).str.strip()
+        body = raw.iloc[hdr + 1:]
 
-                med = next((c for c in d.columns if "median" in str(c).lower() and "income" in str(c).lower()), None)
-                mean = next((c for c in d.columns if "mean" in str(c).lower() and "income" in str(c).lower()), None)
-                earners = next((c for c in d.columns if "earner" in str(c).lower()), None)
-                cols = ["sa2_code_2021"]
-                rename = {}
-                for c, new in [
-                    (med, "tax_median_total_personal_income_2022_23"),
-                    (mean, "tax_mean_total_personal_income_2022_23"),
-                    (earners, "tax_income_earners_2022_23"),
-                ]:
-                    if c:
-                        cols.append(c); rename[c] = new
-                return d[cols].rename(columns=rename).drop_duplicates("sa2_code_2021")
+        out = pd.DataFrame({"sa2_code_2021": normalize_code(body[0])})
+        for c in range(2, raw.shape[1]):
+            name = measures.get(str(measure[c]).strip())
+            if name and re.fullmatch(r"\d{4}-\d{2}", year[c]):
+                out[f"{name}_{year[c].replace('-', '_')}"] = pd.to_numeric(body[c], errors="coerce")
+
+        out = out[out["sa2_code_2021"].str.fullmatch(r"2\d{8}")]
+        if len(out.columns) > 1 and len(out):
+            return out.drop_duplicates("sa2_code_2021")
     print("WARNING: Personal Income SA2 sheet layout not recognised; skipped.")
     return pd.DataFrame(columns=["sa2_code_2021"])
 
@@ -420,7 +416,49 @@ def load_schools():
     if not lat or not lon:
         print("WARNING: School coordinates not found; school access skipped.")
         return pd.DataFrame(columns=["school_lat","school_lon"])
+    # School_Status: O = open, C = closed.
+    if "School_Status" in d.columns:
+        d = d[d["School_Status"].astype(str).str.upper().eq("O")]
     return d.rename(columns={lat:"school_lat", lon:"school_lon"})
+
+NON_STATION_WORDS = r"\b(?:bus|tram|coach|replacement|car park|park & ride|taxi|bike)\b"
+
+def collapse_to_stations(stops):
+    """
+    The METRO/REGIONAL TRAIN stop points include station-precinct facilities
+    (Park & Ride, Bike & Ride, Taxi Zone, "Decision point", lifts), rail
+    replacement bus stops, street names such as "Station St", and several
+    platform-level points per station. Keep points named "... Station" and
+    reduce them to one point per station (mean location), so that per-SA2
+    counts are numbers of stations rather than numbers of stop points.
+    """
+    name = stops["station_name"].fillna("").str.strip()
+    is_station = name.str.contains(r"\bStation$", case=False) & ~name.str.contains(
+        NON_STATION_WORDS, case=False
+    )
+    s = stops[is_station].copy()
+    s["station_key"] = (
+        s["station_name"].str.strip()
+        .str.replace(r"\s+(?:Railway\s+)?Station$", "", case=False, regex=True)
+        .str.lower()
+    )
+    # Same-named stations in different towns stay separate: within each name,
+    # points closer than ~5 km (0.05 deg) chain into one station.
+    s["cell"] = 0
+    for key, idx in s.groupby("station_key").groups.items():
+        if len(idx) > 1:
+            pts = s.loc[idx, ["station_lat", "station_lon"]].to_numpy()
+            s.loc[idx, "cell"] = fcluster(linkage(pts, "single"), 0.05, "distance")
+    return (
+        s.groupby(["station_key", "cell"], as_index=False)
+        .agg(
+            station_name=("station_name", "first"),
+            station_mode=("station_mode", "first"),
+            station_lat=("station_lat", "mean"),
+            station_lon=("station_lon", "mean"),
+        )
+        .drop(columns=["cell"])
+    )
 
 def load_stations():
     """
@@ -492,14 +530,11 @@ def load_stations():
                 d = pd.DataFrame(rows)
                 if not d.empty:
                     d = d.dropna(subset=["station_lat", "station_lon"])
-                    # Platform-level feeds may contain several records at the same
-                    # location/name. Deduplicate before nearest-distance calculation.
-                    d = d.drop_duplicates(
-                        subset=["station_name", "station_lat", "station_lon"]
-                    )
+                    n_stops = len(d)
+                    d = collapse_to_stations(d)
                     print(
-                        f"Loaded {len(d):,} train station/stop points "
-                        "from statewide Public Transport Stops."
+                        f"Loaded {len(d):,} train stations from "
+                        f"{n_stops:,} train-mode stop points in statewide Public Transport Stops."
                     )
                     return d
             except Exception as e:
@@ -850,20 +885,24 @@ def main():
         ("Victoria in Future 2023", load_vif(cache)),
     ]
 
-    sa2_master = sa2.drop(columns="geometry").copy()
+    sa2_master = sa2.drop(columns=["geometry", "shape"], errors="ignore").copy()
     coverage = []
     for name, d in source_frames:
         if "sa2_code_2021" not in d.columns:
             continue
         before = len(sa2_master)
-        matched = sa2_master["sa2_code_2021"].isin(d["sa2_code_2021"]).sum()
+        matched = int(sa2_master["sa2_code_2021"].isin(d["sa2_code_2021"]).sum())
+        # A source that joins almost nothing must not be reported as joined.
+        ok = matched >= MIN_SA2_MATCH_RATE * before
         coverage.append({
             "source": name,
-            "victorian_sa2_matches": int(matched),
+            "victorian_sa2_matches": matched,
             "victorian_sa2_total": int(before),
-            "status": "joined",
-            "detail": "Joined to SA2 master"
+            "status": "joined" if ok else "FAILED",
+            "detail": f"{matched}/{before} SA2s matched ({matched / before:.1%})"
         })
+        if not ok:
+            print(f"WARNING: {name} matched only {matched}/{before} SA2s; its columns will be empty.")
         sa2_master = sa2_master.merge(d, on="sa2_code_2021", how="left")
 
     # 4. Schools -------------------------------------------------------
@@ -880,6 +919,11 @@ def main():
             on="sa2_code_2021", how="left"
         )
         joined = nearest_features(joined, schools, "school_lat","school_lon","school")
+    record_extra_source_status(
+        coverage, "Victorian school locations",
+        "joined" if not schools.empty else "FAILED",
+        f"{len(schools):,} open schools; nearest_school_km per listing, school_count per SA2",
+    )
 
     # 5. Stations ------------------------------------------------------
     stations = load_stations()
@@ -909,10 +953,22 @@ def main():
             on="sa2_code_2021",
             how="left",
         )
+    record_extra_source_status(
+        coverage, "Victorian train stations",
+        "joined" if not stations.empty else "FAILED",
+        f"{len(stations):,} stations; nearest_train_station_km per listing, train_station_count per SA2",
+    )
 
     # 6. Optional OSM --------------------------------------------------
-    if not args.no_osm:
+    if args.no_osm:
+        record_extra_source_status(coverage, "OpenStreetMap amenities", "skipped", "--no-osm")
+    else:
         osm = load_osm_amenities(sa2, cache)
+        record_extra_source_status(
+            coverage, "OpenStreetMap amenities",
+            "joined" if not osm.empty else "FAILED",
+            f"{len(osm):,} amenity points" if not osm.empty else "Overpass unavailable; OSM columns absent",
+        )
         if not osm.empty:
             og = gpd.GeoDataFrame(
                 osm,
@@ -933,6 +989,9 @@ def main():
                   .reset_index()
             )
             sa2_master = sa2_master.merge(counts, on="sa2_code_2021", how="left")
+            # SA2s with no amenity of any kind are absent from `counts`: that is 0, not missing.
+            osm_count_cols = [c for c in counts.columns if c != "sa2_code_2021"]
+            sa2_master[osm_count_cols] = sa2_master[osm_count_cols].fillna(0)
 
             for cat in sorted(osm["amenity_type"].unique()):
                 sub = osm[osm["amenity_type"] == cat]
@@ -977,13 +1036,19 @@ def main():
         "state_code_2021",
         "state_name_2021",
         "shape",
-        "vif_population_2036",
-        "vif_population_growth_pct_2026_36",
         "area_km2",
         "has_carspace",
         "has_structured_features",
     ]
     master = master.drop(columns=[c for c in drop_cols if c in master.columns], errors="ignore")
+
+    # A column that is entirely empty means a loader silently matched nothing.
+    for label, frame in [("sa2_master", sa2_master), ("vic_property_master", master)]:
+        empty = [c for c in frame.columns if frame[c].isna().all()]
+        if empty:
+            print(f"WARNING: all-empty columns in {label}: {', '.join(empty)}")
+            record_extra_source_status(coverage, f"{label} column check", "FAILED",
+                                       f"all-empty columns: {', '.join(empty)}")
 
     # 8. Outputs -------------------------------------------------------
     master.to_csv(outdir / "vic_property_master.csv", index=False)
