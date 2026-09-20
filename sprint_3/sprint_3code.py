@@ -32,8 +32,7 @@ numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 # Remove target
 features = [col for col in numeric_cols if col != target]
 
-# Remove features that directly use rent
-# These would cause target leakage
+# Remove target leakage
 leakage_features = [
     "rent_per_bedroom",
     "rent_vs_2021_census_median",
@@ -45,7 +44,34 @@ features = [
     if col not in leakage_features
 ]
 
+# Remove duplicate SEIFA representations
+duplicate_features = [
+    "irsad_aus_percentile",
+    "irsad_aus_decile",
+    "ieo_aus_percentile",
+    "ieo_aus_decile"
+]
+
+features = [
+    col for col in features
+    if col not in duplicate_features
+]
+
+# Keep only most recent personal income
+most_recent_income = "tax_mean_total_personal_income_2022_23"
+
+income_cols = [
+    col for col in features
+    if "mean_total_personal_income" in col
+]
+
+features = [
+    col for col in features
+    if col not in income_cols or col == most_recent_income
+]
+
 print("Number of features:", len(features))
+print("Personal income feature kept:", most_recent_income)
 
 
 X = df[features].copy()
