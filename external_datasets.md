@@ -4,7 +4,7 @@
 
 - [SA2 District Boundaries for July 2021 - June 2026](https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/edition-3-july-2021-june-2026/access-and-downloads/digital-boundary-files) List of SA2s
 
-- [SA2 Correspondence files for July 2021 - June 2026](https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/edition-3-july-2021-june-2026/access-and-downloads/allocation-files) Lookup table mapping suburbs (SAL), postcodes (POA) and LGAs onto SA2
+- [SA2 Correspondence files for July 2021 - June 2026](https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/edition-3-july-2021-june-2026/access-and-downloads/allocation-files) Lookup table mapping suburbs (SAL), postcodes (POA) and LGAs onto SA2. **Joined.** The MB, POA and SAL allocation files, plus [Census 2021 mesh block counts](https://www.abs.gov.au/census/guide-census-data/mesh-block-counts/latest-release) for dwelling weights, produce `suburb_postcode_sa2.csv` (one row per suburb × postcode × SA2 overlap with dwelling shares) and `sal_code_2021` on each listing. See `sprint_2/README.md`.
 
 - [Digital Atlas of Australia](https://digital.atlas.gov.au/pages/about) REST API for various attributes mapped to different regions (SA2, suburbs, etc.) (need to do more research on which attributes to consider)
 

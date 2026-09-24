@@ -8,11 +8,15 @@ Output:
     output/vic_property_master.csv
     output/sa2_master.csv
     output/sa2_yearly.csv       one row per SA2-year, for forecasting
+    output/suburb_postcode_sa2.csv   suburb x postcode x SA2 dwelling shares
     output/vic_property_rent_ratios.csv   target-derived columns, keyed on listing_id
     output/source_coverage.csv
 
 Core enrichments:
   * ABS ASGS 2021 SA2 geography
+  * ABS ASGS 2021 mesh-block allocation files and Census 2021 mesh block
+    counts: the suburb (SAL) of each listing, and the dwelling-weighted
+    suburb/postcode/SA2 correspondence
   * ABS 2021 General Community Profile (selected useful fields)
   * ABS SEIFA 2021 (all four index scores)
   * ABS Regional Population 2025, plus the yearly SA2 series 2001-2025
@@ -62,6 +66,7 @@ from pipeline.access import (
     STOP_MODES, add_osm_access, load_osm_amenities, load_schools,
     load_stations, load_statewide_stops, one_point_per_stop,
 )
+from pipeline.correspondence import add_suburb_code, load_correspondence
 from pipeline.crime import add_crime_features, build_crime_reference
 from pipeline.crime import SOURCE_NAME as CRIME_SOURCE
 from pipeline.geo import add_point_access
@@ -173,15 +178,17 @@ def add_as_of_sources(master, args, cache, coverage):
     return master
 
 
-def write_outputs(outdir, master, sa2_master, sa2_yearly, rent_ratios, coverage):
+def write_outputs(outdir, master, sa2_master, sa2_yearly, correspondence, rent_ratios, coverage):
     master.to_csv(outdir / "vic_property_master.csv", index=False)
     sa2_master.to_csv(outdir / "sa2_master.csv", index=False)
     sa2_yearly.to_csv(outdir / "sa2_yearly.csv", index=False)
+    correspondence.to_csv(outdir / "suburb_postcode_sa2.csv", index=False)
     rent_ratios.to_csv(outdir / "vic_property_rent_ratios.csv", index=False)
     pd.DataFrame(coverage).to_csv(outdir / "source_coverage.csv", index=False)
 
     print(f"Wrote {len(master):,} listings to {outdir/'vic_property_master.csv'}")
     print(f"Spatial SA2 match rate: {master['sa2_code_2021'].notna().mean():.1%}")
+    print(f"Suburb (SAL) match rate: {master['sal_code_2021'].notna().mean():.1%}")
     if "sqm_market_rent" in master.columns:
         print(f"SQM market-rent match rate: {master['sqm_market_rent'].notna().mean():.1%}")
     if "crime_suburb_rate_per_1k" in master.columns:
@@ -198,9 +205,11 @@ def main():
     cache.mkdir(exist_ok=True)
     coverage = []
 
-    # 1. Listings, placed in their SA2 ---------------------------------
+    # 1. Listings, placed in their SA2 and ABS suburb -----------------
     sa2 = load_sa2()
     listings = join_sa2(load_listings(args.input), sa2)
+    correspondence = load_correspondence(cache, coverage)
+    listings = add_suburb_code(listings, correspondence, coverage)
 
     # 2. Area-level sources -------------------------------------------
     sa2_yearly, income_yearly = load_sa2_yearly(cache, coverage)
@@ -275,7 +284,7 @@ def main():
     master, rent_ratios = split_target_derived(master)
 
     # 8. Outputs -------------------------------------------------------
-    write_outputs(outdir, master, sa2_master, sa2_yearly, rent_ratios, coverage)
+    write_outputs(outdir, master, sa2_master, sa2_yearly, correspondence, rent_ratios, coverage)
 
 
 if __name__ == "__main__":

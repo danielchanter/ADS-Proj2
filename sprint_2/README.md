@@ -14,7 +14,7 @@ python sprint_2/run/run.py
 ```
 
 `run.py` wraps `run/build_master_dataset.py`, which wires together one module
-per source family under `run/pipeline/`: `listings`, `abs_sources`, `access`
+per source family under `run/pipeline/`: `listings`, `correspondence`, `abs_sources`, `access`
 (schools, stations, tram and bus stops, OSM), `sqm`, `crime`, `routing` (ORS)
 and `land` (Vicmap Property), with shared
 helpers in `common` and `geo`.
@@ -74,14 +74,11 @@ them are the wrong property type. `rent_vs_sqm_market` is in
 
 Two things worth knowing:
 
-- **Tolerance matters.** The median gap between index weeks is 7 days in every
-  postcode, but 131 of 425 postcodes drop out of the index for more than 60 days
-  at least once, and the worst gap is 8 years. The 31-day cap gives thin rural
-  postcodes a null during those gaps. 12,666 of 12,717
-  listings match (99.6%); the misses are those dropouts plus one postcode (3413)
-  SQM does not publish.
+- **Tolerance matters.** Thin rural postcodes drop out of the index for months
+  at a time. The 31-day cap gives them a null during those gaps rather than a
+  stale value. SQM does not publish postcode 3413 at all.
 - **Zeros mean missing.** SQM writes 0 when a series had no advertised
-  stock that week (7% of `units_2`), so the loader reads zeros as null.
+  stock that week, so the loader reads zeros as null.
 
 ## Crime
 
@@ -106,9 +103,9 @@ as-of join on `date_listed`, the same shape as the SQM join. A listing from mid-
 therefore gets the year ending March 2024, since the year ending March 2025 was
 still in progress.
 
-Listings are matched to a suburb on `(postcode, suburb)`, which resolves
-12,712 of 12,717 listings. The other 5 (suburb not named by CSA, or no
-postcode/listing date) get nulls in every crime column.
+Listings are matched to a suburb on `(postcode, suburb)`. A listing whose suburb
+CSA does not name, or with no postcode or listing date, gets nulls in every
+crime column.
 
 Columns added, all prefixed `crime_`:
 
@@ -119,23 +116,15 @@ Columns added, all prefixed `crime_`:
 | `crime_suburb_{person,property,drug,public_order,justice,other}_rate_per_1k` | the same rate split by offence division |
 | `crime_suburb_rate_yoy_pct`, `crime_suburb_rate_3yr_change_pct` | whether the suburb is getting better or worse |
 
-Four things worth knowing:
+Three things worth knowing:
 
 - **Incidents are counted where they happen, and the denominator is residents.**
-  Mostly industrial or commercial suburbs therefore show very high rates.
-  Dandenong South records 695 incidents against 125 residents, or 5,560 per 1,000.
-  The same effect is real signal in a CBD (Melbourne 348, Geelong 508, Bendigo
-  371 per 1,000), so the rate is kept as computed. Handle it at modelling time:
-  `np.log1p` the rates for linear models, and use `crime_suburb_population` to
-  filter or weight if residuals point at small suburbs.
-- **The raw rate is weak on its own cross-sectionally.** Victoria's highest-crime
-  suburbs are its activity centres, which also have its highest rents, so
-  `crime_suburb_rate_per_1k` correlates with rent at only −0.12. The per-division
-  rates separate "busy" from "disadvantaged" better than the total does.
-- **Coverage is 99.6%, and the misses are old listings.** The workbook starts at
-  the year ending March 2017, so the 35 listings advertised before then get
-  nulls. The 370-day tolerance is one reporting
-  period plus slack.
+  Mostly industrial or commercial suburbs therefore show very high rates. The
+  same effect is real signal in a CBD, so the rate is kept as computed.
+  `crime_suburb_population` is kept so the rate can be filtered or weighted.
+- **The workbook starts at the year ending March 2017**, so listings advertised
+  before then get nulls. The 370-day tolerance is one reporting period plus
+  slack.
 - **Suburb counts are summed across postcodes.** CSA splits a few suburbs over
   two postcodes: Beaumaris files 3,070 incidents under 3193 and 24 under 3192.
   The ABS population covers the whole suburb, so the incidents are totalled to
@@ -152,6 +141,8 @@ the crime row of `source_coverage.csv`.
 Core joins:
 - Domain rental listings
 - ABS ASGS 2021 SA2 geography
+- ABS ASGS 2021 mesh-block allocation files and Census 2021 mesh block counts:
+  the suburb/postcode/SA2 correspondence (see below)
 - ABS Census 2021 General Community Profile
 - ABS SEIFA 2021
 - ABS Regional Population 2025, plus yearly SA2 population 2001-2025
@@ -205,7 +196,7 @@ Domain's `structured_features` holds 571 distinct free-text labels, many of
 them synonyms. They are grouped into 18 0/1 flags (`feat_air_conditioning`,
 `feat_pets_allowed`, `feat_furnished`, …) and the raw text is dropped. The
 grouping patterns are `STRUCTURED_FEATURE_FLAGS` in `run/pipeline/listings.py`.
-The 10% of listings with no feature list get empty flags rather than 0, since a
+Listings with no feature list get empty flags rather than 0, since a
 blank field says nothing about whether the property has a dishwasher.
 
 ### Rent-derived columns (`vic_property_rent_ratios.csv`)
@@ -223,8 +214,64 @@ predictions against the market:
 | `rent_vs_sqm_market` | against the postcode's SQM market rent at the listing date |
 | `rent_to_area_median_hh_income_pct` | weekly rent as a % of the SA2's weekly median household income |
 
-`weekly_rent` itself is not cleaned: it runs from $0 to $808,500, so choose an
-outlier rule before modelling.
+`weekly_rent` itself is not cleaned.
+
+## Suburbs, postcodes and SA2s (`suburb_postcode_sa2.csv`)
+
+The sources come on three geographies that do not nest: SQM rents per
+postcode, the ABS and VIF covariates per SA2, and Q2 asks for suburbs. Of
+Victoria's 2,944 suburbs, 417 cross an SA2 boundary and 43 cross a postcode
+boundary. Postcode 3168 is Clayton and Notting Hill, and Clayton itself is
+split over two SA2s.
+
+The correspondence is built from ABS mesh blocks, the smallest ABS areas. Each
+Victorian mesh block has one suburb (SAL), one postcode (POA) and one SA2, taken
+from the ASGS 2021 allocation files, and a Census 2021 dwelling count. Summing
+dwellings over mesh blocks gives the size of every suburb × postcode × SA2
+overlap. There is one row per overlap:
+
+| column | meaning |
+|---|---|
+| `sal_code_2021`, `sal_name_2021` | ABS suburb; repeated names carry a disambiguator, `Hillside (Melton - Vic.)` |
+| `postcode` | ABS postal area |
+| `sa2_code_2021`, `sa2_name_2021` | SA2 |
+| `dwellings_2021`, `persons_2021`, `area_sqkm` | size of the overlap |
+| `share_of_suburb`, `share_of_postcode`, `share_of_sa2` | the overlap's share of each area's dwellings |
+
+To move a value onto suburbs, weight by `share_of_suburb`:
+
+```python
+corr = pd.read_csv("suburb_postcode_sa2.csv", dtype={"postcode": str, "sa2_code_2021": str})
+x = corr.merge(sa2_master[["sa2_code_2021", "vif_population_growth_pct_2026_31"]], on="sa2_code_2021")
+suburb_vif = (x["share_of_suburb"] * x["vif_population_growth_pct_2026_31"]).groupby(x["sal_code_2021"]).sum()
+```
+
+Postcode rents work the same way, joined on `postcode`. Within one suburb,
+postcode or SA2 the shares sum to 1.
+
+Each listing also gets `sal_code_2021` and `sal_name_2021`, matched on its
+Domain `(suburb, postcode)`. The postcode is needed because suburb names repeat
+(Ascot is in both Ballarat and Bendigo, Hillside in both Melton and East Gippsland). 12,716 of 12,717 listings match: the
+exception is Hidden Valley 3756, which is not an ABS suburb.
+
+Things worth knowing:
+
+- **Weights are 2021 dwellings.** Rents are about dwellings, so dwellings are a
+  better weight than land area. 123 suburbs (parks, industrial estates) have no
+  dwellings, and their shares fall back to land area.
+- **ABS adds random noise to the counts** to protect confidentiality, so
+  a tiny overlap can show 0 dwellings next to a few persons.
+- **An ABS postal area is not an Australia Post postcode.** ABS builds postal
+  areas from mesh blocks, so the edges are approximate and a few PO-box-only
+  postcodes are missing. Every Domain and SQM postcode has a matching postal
+  area.
+- **The listing's suburb comes from Domain's label, and its SA2 from its
+  coordinates.** For 0.5% of listings the SA2 is not one the suburb touches.
+  These listings sit near a boundary or carry a neighbouring suburb's name
+  (15 of them are in Wodonga).
+- The four ABS workbooks (about 90 MB) are cached under `_cache/`, and the
+  joined Victorian mesh-block table is cached as `vic_mesh_blocks.csv`. The first
+  run adds about a minute.
 
 ## Yearly SA2 series (`sa2_yearly.csv`)
 
@@ -247,8 +294,7 @@ so no boundary conversion is needed.
   by about 8% on earners and 4% on medians for the same years, so its one extra
   year (2016-17) is rescaled per SA2 by the median ratio over the four
   overlapping years. Those rows are labelled `2020-21 (rescaled)`.
-- About 0.3% of income values are not published by ABS (small SA2s) and are
-  left empty.
+- Income values ABS does not publish (small SA2s) are left empty.
 - 2022-23 is also joined to every listing as the `tax_*_2022_23` columns.
 
 ## Outputs
@@ -257,6 +303,7 @@ so no boundary conversion is needed.
 - `vic_property_master.csv`: main listing-level table
 - `sa2_master.csv`: SA2-level table
 - `sa2_yearly.csv`: one row per SA2 and year, for the forecasting model
+- `suburb_postcode_sa2.csv`: dwelling shares linking suburbs, postcodes and SA2s
 - `vic_property_rent_ratios.csv`: rent-derived columns, not for use as predictors
 - `source_coverage.csv`: source-by-source join/status audit
 
@@ -296,7 +343,7 @@ furniture (Park & Ride, Lift, Decision point, Taxi Zone…) and rail replacement
 bus stops, which would otherwise count as "stations" in `train_station_count`.
 The pipeline keeps records named `X Station` or `X Railway Station` and
 collapses each station's platform and entrance records (Southern Cross has 36)
-to one point at their mean. That leaves 320 stations: 226 metro, 94 V/Line-only.
+to one point at their mean.
 
 It adds:
 - `nearest_train_station_km` for each rental listing (straight line)
@@ -310,27 +357,17 @@ The same Public Transport Stops download gives tram stops (`METRO TRAM`) and bus
 stops (`METRO BUS` and `REGIONAL BUS`). Regional coaches and SkyBus are left
 out, since they run a few services a day or only to the airport.
 
-Each direction of a stop is its own record, one on each side of the road, so
-the feed has 1,621 tram records for 987 tram stops. Records are merged into one
-stop when they have the same name and are within 250 m of each other. Name alone
-is not enough: bus stop names repeat across the state, and "Station St/High St"
-is used for stops 180 km apart. That leaves 987 tram stops and 18,383 bus stops,
-of which 18,147 are in Victorian SA2s. The rest are just over the border.
+Each direction of a stop is its own record, one on each side of the road.
+Records are merged into one stop when they have the same name and are within
+250 m of each other. Name alone is not enough: bus stop names repeat across the
+state, and "Station St/High St" is used for stops 180 km apart.
 
 It adds:
 - `nearest_tram_stop_km` and `nearest_bus_stop_km` for each rental listing (straight line)
 - `tram_stop_count` and `bus_stop_count` for the listing's SA2
 
-Two things worth knowing:
-
-- **Trams only run in Melbourne.** Only 88 SA2s have a tram stop. Outside
-  Melbourne, `nearest_tram_stop_km` measures how far away Melbourne's tram
-  network is, which repeats `cbd_km`. Use `np.log1p`, or cap the column, before
-  modelling. Among Melbourne listings, 30% are within 400 m of a tram stop.
-- **Bus stops are everywhere.** 79% of listings are within 400 m of one, so
-  `nearest_bus_stop_km` mostly picks out rural listings. It does not measure how
-  good the bus service is, because the feed has no timetables. Service
-  frequency would need the PTV GTFS timetable.
+The feed has no timetables, so these columns measure how close a stop is, not
+how good the service is. Service frequency would need the PTV GTFS timetable.
 
 ## Driving routes (OpenRouteService)
 
@@ -357,7 +394,7 @@ Without a key the routes are skipped (recorded as `skipped` in
 How it works:
 
 - **Listings are routed once per location.** Coordinates are rounded to 5 dp
-  (about 1 m), which turns 12,717 listings into ~11,300 origins.
+  (about 1 m), so listings in the same building share one route.
 - **The road-nearest station is found among the 3 nearest by straight line.**
   A river or freeway can make the closest station by distance a longer drive
   than the second closest. Change the number with `--ors-station-candidates`.
@@ -379,7 +416,7 @@ How it works:
 
 ## Land size (Vicmap Property)
 
-Domain's `land_area` field is filled for 2 of 12,717 listings, and the listing
+Domain's `land_area` field is almost always empty, and the listing
 pages can no longer be re-scraped: they are a year old and Domain answers
 automated requests with 403. Land size is taken instead from **Vicmap Property**,
 the state's open property map, which has a polygon for every rateable property
@@ -411,6 +448,9 @@ How it works:
 
 Things worth knowing:
 
+- **A granny flat or studio on a house block gets the whole block.** It shares
+  the lot with the main house but is not strata-titled, so nothing marks the lot
+  as shared.
 - **Apartments can have land.** Units in a small block that has been subdivided
   into separate titles each have their own lot, and they are kept with their
   own land size.
