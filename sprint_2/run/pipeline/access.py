@@ -66,6 +66,9 @@ def load_schools():
     if not lat or not lon:
         print("WARNING: School coordinates not found; school access skipped.")
         return pd.DataFrame(columns=["school_lat","school_lon"])
+    # School_Status: O = open, C = closed.
+    if "School_Status" in d.columns:
+        d = d[d["School_Status"].astype(str).str.upper().eq("O")]
     d = d.rename(columns={lat:"school_lat", lon:"school_lon"})
     return with_numeric_coords(d, "school_lat", "school_lon")
 

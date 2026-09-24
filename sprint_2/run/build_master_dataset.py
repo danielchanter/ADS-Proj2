@@ -76,6 +76,11 @@ from pipeline.routing import add_ors_route_features
 from pipeline.sqm import SQM_RENTS_CSV, add_sqm_market_features, load_sqm_weekly_rents
 from pipeline.sqm import SOURCE_NAME as SQM_SOURCE
 
+# A core SA2 source joining fewer than this share of Victorian SA2s is
+# reported as failed in source_coverage.csv (a few SA2s legitimately have no
+# population, e.g. "No usual address", so 100% is not expected).
+MIN_SA2_MATCH_RATE = 0.90
+
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -140,11 +145,17 @@ def build_sa2_master(sa2, income_yearly, cache, coverage):
     for name, d in source_frames:
         if "sa2_code_2021" not in d.columns:
             continue
-        matched = sa2_master["sa2_code_2021"].isin(d["sa2_code_2021"]).sum()
+        total = len(sa2_master)
+        matched = int(sa2_master["sa2_code_2021"].isin(d["sa2_code_2021"]).sum())
+        # A source that joins almost nothing must not be reported as joined.
+        ok = matched >= MIN_SA2_MATCH_RATE * total
         record_source(
-            coverage, name, "joined", "Joined to SA2 master",
-            matches=int(matched), total=int(len(sa2_master)),
+            coverage, name, "joined" if ok else "failed",
+            f"{matched}/{total} SA2s matched ({matched / total:.1%})",
+            matches=matched, total=total,
         )
+        if not ok:
+            print(f"WARNING: {name} matched only {matched}/{total} SA2s; its columns will be empty.")
         sa2_master = sa2_master.merge(d, on="sa2_code_2021", how="left")
     return sa2_master
 
@@ -176,6 +187,16 @@ def add_as_of_sources(master, args, cache, coverage):
             print(f"WARNING: crime enrichment failed: {e}")
             record_source(coverage, CRIME_SOURCE, "failed", str(e))
     return master
+
+
+def check_empty_columns(coverage, **frames):
+    """A column that is entirely empty means a loader silently matched nothing."""
+    for label, frame in frames.items():
+        empty = [c for c in frame.columns if frame[c].isna().all()]
+        if empty:
+            print(f"WARNING: all-empty columns in {label}: {', '.join(empty)}")
+            record_source(coverage, f"{label} column check", "failed",
+                          f"all-empty columns: {', '.join(empty)}")
 
 
 def write_outputs(outdir, master, sa2_master, sa2_yearly, correspondence, rent_ratios, coverage):
@@ -221,6 +242,11 @@ def main():
         listings, sa2_master = add_point_access(
             listings, sa2_master, sa2, schools, "school_lat", "school_lon", "school"
         )
+    record_source(
+        coverage, "Victorian school locations",
+        "joined" if not schools.empty else "failed",
+        f"{len(schools):,} open schools; nearest_school_km per listing, school_count per SA2",
+    )
     stops = load_statewide_stops()
     stations = load_stations(stops)
     if not stations.empty:
@@ -256,8 +282,15 @@ def main():
         listings = add_land_features(listings, coverage, cache)
 
     # 6. Optional OSM --------------------------------------------------
-    if not args.no_osm:
+    if args.no_osm:
+        record_source(coverage, "OpenStreetMap amenities", "skipped", "--no-osm")
+    else:
         osm = load_osm_amenities(sa2, cache)
+        record_source(
+            coverage, "OpenStreetMap amenities",
+            "joined" if not osm.empty else "failed",
+            f"{len(osm):,} amenity points" if not osm.empty else "Overpass unavailable; OSM columns absent",
+        )
         if not osm.empty:
             listings, sa2_master = add_osm_access(listings, sa2_master, sa2, osm)
 
@@ -284,6 +317,7 @@ def main():
     master, rent_ratios = split_target_derived(master)
 
     # 8. Outputs -------------------------------------------------------
+    check_empty_columns(coverage, sa2_master=sa2_master, vic_property_master=master)
     write_outputs(outdir, master, sa2_master, sa2_yearly, correspondence, rent_ratios, coverage)
 
 

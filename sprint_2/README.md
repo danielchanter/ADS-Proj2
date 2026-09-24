@@ -5,10 +5,16 @@ raw Domain rental listings.
 
 ## Run
 
+The raw Domain listings must first be placed at `sprint_2/data/raw/vic_rentals_all.csv`
+(course data from Canvas; it is not committed).
+
 From the repository root:
 
 ```bash
+# macOS / Linux
 source .venv/bin/activate
+# Windows (PowerShell):  .venv\Scripts\Activate.ps1
+
 pip install -r sprint_2/requirements.txt
 python sprint_2/run/run.py
 ```
@@ -18,6 +24,10 @@ per source family under `run/pipeline/`: `listings`, `correspondence`, `abs_sour
 (schools, stations, tram and bus stops, OSM), `sqm`, `crime`, `routing` (ORS)
 and `land` (Vicmap Property), with shared
 helpers in `common` and `geo`.
+
+After each run, check `data/processed/source_coverage.csv`: any core source
+with `status = failed` (fewer than 90% of Victorian SA2s matched) or any
+"column check" row means a loader silently returned nothing.
 
 OpenStreetMap amenities are now included by default. If Overpass is unavailable
 or you need a quick run:
@@ -346,8 +356,8 @@ collapses each station's platform and entrance records (Southern Cross has 36)
 to one point at their mean.
 
 It adds:
-- `nearest_train_station_km` for each rental listing (straight line)
-- `train_station_count` for the listing's SA2
+- `nearest_train_station_km` for each rental listing (straight-line distance)
+- `train_station_count` for the listing's SA2 (number of stations)
 
 The older Metro Train Stations accessibility dataset is only used as a fallback.
 
