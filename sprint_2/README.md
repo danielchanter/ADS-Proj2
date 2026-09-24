@@ -57,13 +57,14 @@ Columns added, all prefixed `sqm_`:
 
 | Column | Meaning |
 | --- | --- |
-| `sqm_week`, `sqm_week_lag_days` | the index week matched, and how far before the listing date it sits |
-| `sqm_houses_all`, `sqm_houses_3`, `sqm_units_all`, `sqm_units_2`, `sqm_combined` | the five raw series at that week |
-| `sqm_*_yoy_pct` | year-on-year change of each series, matched 52 weeks back by date |
-| `sqm_market_series`, `sqm_market_rent` | which series the listing is compared against (house index for houses, unit index for units, combined if ambiguous) and its value |
-| `sqm_market_rent_yoy_pct` | market momentum in that postcode at the listing date |
+| `sqm_week_lag_days` | how far before the listing date the matched index week sits |
+| `sqm_market_rent` | the type-matched series at that week: house index for houses, unit index for units, combined if ambiguous |
+| `sqm_market_rent_yoy_pct` | market momentum in that postcode at the listing date, matched 52 weeks back by date |
 | `sqm_market_rent_bedroom_matched` | tighter comparable, non-null only for 3-bed houses and 2-bed units |
-| `rent_vs_sqm_market` | `weekly_rent / sqm_market_rent` — the listing priced against its market |
+
+The five raw SQM series are read but not kept: for any one listing, four of
+them are the wrong property type. `rent_vs_sqm_market` is in
+`vic_property_rent_ratios.csv` (see "Rent-derived columns" below).
 
 Two things worth knowing:
 
@@ -108,11 +109,10 @@ Columns added, all prefixed `crime_`:
 
 | Column | Meaning |
 | --- | --- |
-| `crime_suburb_incidents`, `crime_suburb_population` | the suburb's incidents that period and its Census 2021 population |
+| `crime_suburb_population` | the suburb's Census 2021 population, the rate's denominator |
 | `crime_suburb_rate_per_1k` | incidents per 1,000 residents — the headline suburb measure |
 | `crime_suburb_{person,property,drug,public_order,justice,other}_rate_per_1k` | the same rate split by offence division |
 | `crime_suburb_rate_yoy_pct`, `crime_suburb_rate_3yr_change_pct` | whether the suburb is getting better or worse |
-| `crime_sal_ambiguous` | 1 where a repeated suburb name could not be resolved by LGA |
 
 Four things worth knowing:
 
@@ -127,7 +127,7 @@ Four things worth knowing:
   suburbs are its activity centres, which also have its highest rents, so
   `crime_suburb_rate_per_1k` correlates with rent at only −0.12. The per-division
   rates separate "busy" from "disadvantaged" better than the total does.
-- **Coverage is 99.7%, and the misses are old listings.** The workbook starts at
+- **Coverage is 99.6%, and the misses are old listings.** The workbook starts at
   the year ending March 2017, so the 35 listings advertised before then get
   nulls. The 370-day tolerance is one reporting
   period plus slack.
@@ -139,8 +139,8 @@ Four things worth knowing:
 Fifteen Victorian suburb names are used twice (Hillside, Newtown, Ascot…). They
 are told apart by the LGA the incidents sit in, which ABS encodes in the SAL name
 (`Hillside (Melton - Vic.)`). All of them resolve on the current data. Any
-future unresolved name is matched to the more populous suburb and flagged in
-`crime_sal_ambiguous`.
+future unresolved name is matched to the more populous suburb and counted in
+the crime row of `source_coverage.csv`.
 
 ## Sources handled by the pipeline
 
@@ -158,26 +158,66 @@ Core joins:
 - SQM Research weekly postcode rent index (as-of join, see above)
 - Crime Statistics Victoria, suburb level (as-of join, see above)
 
-Additional registered/discovered sources:
-- Victorian Property Sales Report
-- DFFH Rental Report
-- School Zones
-- PTV timetable data
-- Vicmap Features of Interest
-- Digital Atlas of Australia
-- ABS Building Approvals
-- ABS CPI / Melbourne rents
-- ASGS 2026 correspondence
+Candidate sources not joined yet. Each needs a period or geographic
+correspondence defined before it can be joined without presenting suburb/LGA
+values as exact SA2 measurements:
+- [DFFH Rental Report](https://www.dffh.vic.gov.au/publications/rental-report) —
+  signed-rent benchmark; avoid a same-period suburb median as a predictor
+- [Victorian Property Sales Report](https://discover.data.vic.gov.au/dataset/victorian-property-sales-report-median-house-by-suburb-time-series)
+- [School Zones](https://discover.data.vic.gov.au/dataset/?q=school+zones)
+- [PTV Timetable API](https://discover.data.vic.gov.au/dataset/ptv-timetable-api)
+- [Vicmap Features of Interest](https://discover.data.vic.gov.au/dataset/vicmap-features-of-interest-rest-api)
+- [ABS Building Approvals](https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release) —
+  SA2 small-area approvals, a supply covariate for forecasting
+- [ABS CPI](https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/consumer-price-index-australia/latest-release) —
+  Melbourne rents, a Melbourne-wide time series, not an SA2 differentiator
+- [ASGS 2026](https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/latest-release) —
+  correspondence needed for outputs on 2026 geography
 
-Sources with coarse or differently-defined geographies are left unmerged. They
-are recorded in `source_coverage.csv` and
-`extra_source_manifest.csv` so the modelling team can distinguish:
-1. features actually joined to each listing,
-2. forecast/context sources, and
-3. sources requiring a defined period/geographic correspondence.
+## What is kept, and what is left out
 
-This prevents suburb/LGA values from being incorrectly presented as exact SA2
-measurements.
+Columns that restate another column are not written, so the modelling table has
+one column per piece of information:
+
+- **SEIFA:** the four index scores only. The national deciles and percentiles
+  are rank transforms of the scores (r ≥ 0.95).
+- **Population:** `erp_2025`, its 2024-25 growth, density and migration. The
+  2024 level, the change in persons, births, deaths and the 2021 Census count
+  all restate those; the full ERP history is in `sa2_yearly.csv`.
+- **Victoria in Future:** `vif_population_growth_pct_2026_31`, the projected
+  five-year change. The projected levels are near-copies of `erp_2025`, and the
+  2026-36 change correlates with the 2026-31 one at 0.99.
+- **Geography:** SA2 code and name, then SA3/SA4/GCCSA names only (each code
+  maps one-to-one onto its name).
+- **Listing:** `secondary_type` is dropped because it equals `property_type` on
+  every listing.
+
+### Amenity flags (`feat_*`)
+
+Domain's `structured_features` holds 571 distinct free-text labels, many of
+them synonyms. They are grouped into 18 0/1 flags (`feat_air_conditioning`,
+`feat_pets_allowed`, `feat_furnished`, …) and the raw text is dropped. The
+grouping patterns are `STRUCTURED_FEATURE_FLAGS` in `build_master_dataset.py`.
+The 10% of listings with no feature list get empty flags rather than 0, since a
+blank field says nothing about whether the property has a dishwasher.
+
+### Rent-derived columns (`vic_property_rent_ratios.csv`)
+
+Columns computed from `weekly_rent` would leak the target into the model and
+inflate its "most important features". They are written to a separate table,
+keyed on `listing_id`, for the affordability analysis (Q3) and for checking
+predictions against the market:
+
+| column | meaning |
+|---|---|
+| `bond` | set from the rent, usually one month of it; nulled outside 2-8 weeks' rent as a data error |
+| `rent_per_bedroom` | `weekly_rent / bedrooms` |
+| `rent_vs_2021_census_median` | against the SA2's 2021 Census median rent |
+| `rent_vs_sqm_market` | against the postcode's SQM market rent at the listing date |
+| `rent_to_area_median_hh_income_pct` | weekly rent as a % of the SA2's weekly median household income |
+
+`weekly_rent` itself is not cleaned: it runs from $0 to $808,500, so choose an
+outlier rule before modelling.
 
 ## Yearly SA2 series (`sa2_yearly.csv`)
 
@@ -210,18 +250,26 @@ so no boundary conversion is needed.
 - `vic_property_master.csv` — main listing-level table
 - `sa2_master.csv` — SA2-level table
 - `sa2_yearly.csv` — one row per SA2 and year, for the forecasting model
+- `vic_property_rent_ratios.csv` — rent-derived columns, not for use as predictors
 - `source_coverage.csv` — source-by-source join/status audit
-- `extra_source_manifest.csv` — current discovered DataVic resources
 
 Temporary downloads are cached under `data/processed/_cache/`.
 
 
 ## Overpass / OSM reliability
 
-OpenStreetMap amenity enrichment uses public Overpass servers. These services can
-temporarily return HTTP 406, 429, or 5xx responses. The pipeline now tries
-multiple public mirrors and both POST and GET requests. If all mirrors fail, OSM
-is skipped and the rest of the master dataset is still produced.
+OpenStreetMap amenity enrichment uses public Overpass servers. Each amenity
+category is queried separately across Victoria and cached as
+`_cache/osm_<category>.json`, so a failed category is retried on the next run
+without refetching the others. A single query for every category at once is
+heavy enough that the servers reject it, and `overpass-api.de` answers
+`Accept: application/json` with 406, so the request sends `*/*`.
+
+Each mirror is tried twice before a category is skipped; the rest of the master
+dataset is still produced. GPs use `amenity=doctors`; the secondary
+`healthcare=doctor` tag times out statewide.
+
+It adds `nearest_<category>_km` per listing and `osm_<category>_count` per SA2.
 
 For a deliberately fast run without OSM:
 

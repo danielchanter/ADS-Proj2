@@ -9,12 +9,13 @@ Output:
     output/vic_property_master.csv
     output/sa2_master.csv
     output/sa2_yearly.csv       one row per SA2-year, for forecasting
+    output/vic_property_rent_ratios.csv   target-derived columns, keyed on listing_id
     output/source_coverage.csv
 
 Core enrichments:
   * ABS ASGS 2021 SA2 geography
   * ABS 2021 General Community Profile (selected useful fields)
-  * ABS SEIFA 2021 (all four indexes)
+  * ABS SEIFA 2021 (all four index scores)
   * ABS Regional Population 2025, plus the yearly SA2 series 2001-2025
   * ABS Personal Income, SA2, 2016-17 to 2022-23 (three releases stacked);
     2022-23 is joined to listings, every year goes to sa2_yearly.csv
@@ -31,7 +32,7 @@ Install:
     pip install pandas geopandas shapely requests pyogrio openpyxl scipy
 
 Usage:
-    python build_vic_property_master.py --input vic_rentals_all.csv --output-dir output
+    python sprint_2/run/build_master_dataset.py   # or run.py, which wraps it
 
 Notes:
   * No OpenRouteService API key is required because no destination/commute target
@@ -46,10 +47,8 @@ import argparse
 import calendar
 import io
 import json
-import math
 import re
 import time
-import zipfile
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -58,7 +57,6 @@ import pandas as pd
 import geopandas as gpd
 import requests
 from scipy.spatial import cKDTree
-from shapely.geometry import Point
 
 # ---------------------------------------------------------------------
 # VERIFIED PUBLIC SOURCES
@@ -158,7 +156,6 @@ DATAVIC_PACKAGE_SHOW = "https://discover.data.vic.gov.au/api/3/action/package_sh
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.nchc.org.tw/api/interpreter",
 ]
 
 
@@ -314,15 +311,6 @@ def pick_col(df, candidates):
 def numeric(series):
     return pd.to_numeric(series, errors="coerce")
 
-def haversine_km(lat1, lon1, lat2, lon2):
-    r = 6371.0088
-    p1 = np.radians(lat1)
-    p2 = np.radians(lat2)
-    dlat = np.radians(lat2 - lat1)
-    dlon = np.radians(lon2 - lon1)
-    a = np.sin(dlat/2)**2 + np.cos(p1)*np.cos(p2)*np.sin(dlon/2)**2
-    return 2*r*np.arcsin(np.sqrt(a))
-
 def nearest_features(properties, features, lat_col, lon_col, prefix):
     """
     Fast nearest straight-line distance. For metro-scale access variables this is
@@ -380,10 +368,10 @@ def load_sa2():
     g = arcgis_geojson(
         SA2_URL,
         where="state_code_2021='2'",
+        # Names only above SA2: each SA3/SA4/GCCSA code maps 1:1 onto its name.
         out_fields=(
-            "sa2_code_2021,sa2_name_2021,sa3_code_2021,sa3_name_2021,"
-            "sa4_code_2021,sa4_name_2021,gccsa_code_2021,gccsa_name_2021,"
-            "state_code_2021,state_name_2021,area_albers_sqkm"
+            "sa2_code_2021,sa2_name_2021,sa3_name_2021,sa4_name_2021,"
+            "gccsa_name_2021,area_albers_sqkm"
         ),
     )
     g["sa2_code_2021"] = normalize_code(g["sa2_code_2021"])
@@ -420,15 +408,15 @@ def load_gcp():
         numeric(d["Lang_used_home_Eng_only_P"]) + numeric(d["Lang_used_home_Oth_Lang_P"])
     ).replace(0, np.nan)
 
+    # Tot_P_P is only the denominator above: erp_2025 is the current population.
     keep = [
-        "sa2_code_2021","Tot_P_P","Median_age_persons",
+        "sa2_code_2021","Median_age_persons",
         "Median_tot_prsnl_inc_weekly","Median_tot_hhd_inc_weekly",
         "Median_rent_weekly","Median_mortgage_repay_monthly",
         "Average_household_size","age_0_14_pct","age_25_44_pct",
         "age_65_plus_pct","born_overseas_pct","non_english_home_pct"
     ]
     return d[keep].rename(columns={
-        "Tot_P_P":"census_population_2021",
         "Median_age_persons":"census_median_age",
         "Median_tot_prsnl_inc_weekly":"census_median_personal_income_weekly",
         "Median_tot_hhd_inc_weekly":"census_median_household_income_weekly",
@@ -438,24 +426,19 @@ def load_gcp():
     })
 
 def load_seifa():
-    fields = (
-        "sa2_code_2021,sa2_name_2021,"
-        "irsad_score,irsad_aus_decile,irsad_aus_percentile,"
-        "irsd_score,irsd_aus_decile,irsd_aus_percentile,"
-        "ier_score,ier_aus_decile,ier_aus_percentile,"
-        "ieo_score,ieo_aus_decile,ieo_aus_percentile"
-    )
+    # Scores only: the national deciles and percentiles are rank transforms of
+    # them (r >= 0.95) and add nothing a model can use.
+    fields = "sa2_code_2021,irsad_score,irsd_score,ier_score,ieo_score"
     d = arcgis_geojson(SEIFA_URL, out_fields=fields, return_geometry=False)
     d["sa2_code_2021"] = normalize_code(d["sa2_code_2021"])
-    d = d[d["sa2_code_2021"].str.startswith("2")].copy()
-    return d.drop(columns=["sa2_name_2021"], errors="ignore")
+    return d[d["sa2_code_2021"].str.startswith("2")].copy()
 
 def load_regional_population():
+    # erp_2024, the change in persons, and births/deaths/natural increase all
+    # restate erp_2025 and its growth rate; the full ERP history is in sa2_yearly.
     fields = (
-        "sa2_code_2021,sa2_name_2021,erp_2024,erp_2025,"
-        "erp_change_number_2024_25,erp_change_per_cent_2024_25,"
-        "area_km2,pop_density_2025_people_per_km2,"
-        "births_2024_25,deaths_2024_25,natural_increase_2024_25,"
+        "sa2_code_2021,erp_2025,erp_change_per_cent_2024_25,"
+        "pop_density_2025_people_per_km2,"
         "net_internal_migration_2024_25,net_overseas_migration_2024_25"
     )
     d = arcgis_geojson(
@@ -465,68 +448,49 @@ def load_regional_population():
         return_geometry=False,
     )
     d["sa2_code_2021"] = normalize_code(d["sa2_code_2021"])
-    return d.drop(columns=["sa2_name_2021"], errors="ignore").rename(columns={
+    return d.rename(columns={
         "erp_change_per_cent_2024_25":"population_growth_pct_2024_25",
         "pop_density_2025_people_per_km2":"population_density_2025",
     })
 
 def load_vif(cache_dir: Path):
+    """
+    Projected population growth per SA2 from the VIF 2023 Total_Population sheet.
+
+    Only that sheet is read. The workbook's other sheets (dwellings, households
+    and their breakdowns) share the same year headers, so reading them together
+    and matching on "2036" mixes household counts into the population figures.
+    """
     path = cache_dir / "vif_sa2.xlsx"
     if not path.exists():
         r = requests.get(VIF_URL, timeout=180)
         r.raise_for_status()
         path.write_bytes(r.content)
 
-    xls = pd.ExcelFile(path)
-    frames = []
-    for s in xls.sheet_names:
-        raw = pd.read_excel(path, sheet_name=s, header=None)
-        # Find a row containing SA2/code and projection years.
-        header_i = None
-        for i in range(min(len(raw), 30)):
-            # Convert every cell safely to text before searching.
-            vals = [str(x).lower() if pd.notna(x) else "" for x in raw.iloc[i].tolist()]
-            if any("sa2" in x for x in vals) and any("2036" in x for x in vals):
-                header_i = i
-                break
-        if header_i is None:
-            continue
-        d = pd.read_excel(path, sheet_name=s, header=header_i)
-        frames.append(d)
-
-    if not frames:
+    raw = pd.read_excel(path, sheet_name="Total_Population", header=None)
+    # The header row holds the SA2 code label and the projection years.
+    header_i = next(
+        (i for i in range(min(len(raw), 30))
+         if any("sa2" in str(x).lower() for x in raw.iloc[i])
+         and any(str(x).startswith("2036") for x in raw.iloc[i])),
+        None,
+    )
+    if header_i is None:
         print("WARNING: VIF workbook layout not recognised; VIF columns skipped.")
         return pd.DataFrame(columns=["sa2_code_2021"])
 
-    d = pd.concat(frames, ignore_index=True, sort=False)
-    code = next((c for c in d.columns if "sa2" in str(c).lower() and "code" in str(c).lower()), None)
-    if code is None:
-        print("WARNING: VIF SA2 code column not found.")
-        return pd.DataFrame(columns=["sa2_code_2021"])
-
+    d = pd.read_excel(path, sheet_name="Total_Population", header=header_i)
+    d.columns = [str(c).strip().removesuffix(".0") for c in d.columns]
+    code = next(c for c in d.columns if "sa2" in c.lower() and "code" in c.lower())
     d["sa2_code_2021"] = normalize_code(d[code])
-    d = d[d["sa2_code_2021"].str.startswith("2")].copy()
+    d = d[d["sa2_code_2021"].str.fullmatch(r"2\d{8}")].copy()
 
-    def year_col(year):
-        for c in d.columns:
-            if str(year) == str(c).strip() or str(year) in str(c):
-                return c
-        return None
-
-    c2026, c2031, c2036 = year_col(2026), year_col(2031), year_col(2036)
-    out = d[["sa2_code_2021"]].drop_duplicates().copy()
-
-    # Prefer total population/dwelling/household fields if repeated years exist.
-    # We select numeric year-labelled columns only if there is one obvious set.
-    for year, col in [(2026,c2026),(2031,c2031),(2036,c2036)]:
-        if col:
-            out[f"vif_population_{year}"] = pd.to_numeric(d[col], errors="coerce").groupby(d["sa2_code_2021"]).transform("max")
-    out = out.groupby("sa2_code_2021", as_index=False).max(numeric_only=True)
-
-    if "vif_population_2026" in out and "vif_population_2036" in out:
-        out["vif_population_growth_pct_2026_36"] = 100 * (
-            out["vif_population_2036"] / out["vif_population_2026"] - 1
-        )
+    # Only the projected change leaves this function: the projected levels are
+    # near-copies of erp_2025. 2026-31 matches the five-year horizon the brief
+    # asks about; 2026-36 correlates with it at 0.99 so adds nothing.
+    out = d[["sa2_code_2021"]].copy()
+    start = numeric(d["2026"]).replace(0, np.nan)
+    out["vif_population_growth_pct_2026_31"] = 100 * (numeric(d["2031"]) / start - 1)
     return out
 
 def cached_download(url, path: Path, timeout=180):
@@ -820,140 +784,87 @@ OSM_AMENITIES = {
     "gym": [('leisure','fitness_centre')],
     "childcare": [('amenity','childcare')],
     "hospital": [('amenity','hospital')],
-    "gp_clinic": [('amenity','clinic'),('healthcare','doctor')],
+    # amenity=doctors is OSM's primary GP tag; the secondary healthcare=doctor
+    # tag is on nearly the same features and Overpass times out on it statewide.
+    "gp_clinic": [('amenity','clinic'),('amenity','doctors')],
     "library": [('amenity','library')],
     "park": [('leisure','park')],
     "shopping_centre": [('shop','mall')],
 }
 
-def overpass_bbox_query(south, west, north, east):
-    clauses = []
-    for label, tags in OSM_AMENITIES.items():
-        for key, val in tags:
-            clauses.append(f'nwr["{key}"="{val}"]({south},{west},{north},{east});')
+def overpass_bbox_query(tags, south, west, north, east):
+    """
+    One amenity category across the bounding box, or None if every mirror failed.
 
-    q = "[out:json][timeout:120];(" + "".join(clauses) + ");out center tags;"
+    Categories are queried one at a time: a single statewide query for all of
+    them is heavy enough that the public servers reject or time it out.
+    """
+    clauses = "".join(
+        f'nwr["{key}"="{val}"]({south},{west},{north},{east});' for key, val in tags
+    )
+    q = "[out:json][timeout:180];(" + clauses + ");out center tags;"
 
+    # overpass-api.de answers "Accept: application/json" with 406/504; the JSON
+    # body comes back fine under a wildcard.
     headers = {
         "User-Agent": "ADS-Proj2-Victorian-Rental-Research/1.0",
-        "Accept": "application/json",
+        "Accept": "*/*",
     }
 
     errors = []
+    # Two passes: 429/504 from these servers usually just means busy right now.
+    for attempt in range(2):
+        if attempt:
+            time.sleep(30)
+        for url in OVERPASS_URLS:
+            try:
+                r = requests.post(url, data={"data": q}, headers=headers, timeout=240)
+                if r.ok:
+                    return r.json().get("elements", [])
+                errors.append(f"{url} -> HTTP {r.status_code}")
+            except Exception as e:
+                errors.append(f"{url} -> {type(e).__name__}: {e}")
 
-    for url in OVERPASS_URLS:
-        # First try POST, which is standard for larger Overpass queries.
-        try:
-            r = requests.post(
-                url,
-                data={"data": q},
-                headers=headers,
-                timeout=180
-            )
-            if r.ok:
-                return r.json().get("elements", [])
-            errors.append(f"{url} POST -> HTTP {r.status_code}")
-        except Exception as e:
-            errors.append(f"{url} POST -> {type(e).__name__}: {e}")
-
-        # Some public mirrors are happier with GET.
-        try:
-            r = requests.get(
-                url,
-                params={"data": q},
-                headers=headers,
-                timeout=180
-            )
-            if r.ok:
-                return r.json().get("elements", [])
-            errors.append(f"{url} GET -> HTTP {r.status_code}")
-        except Exception as e:
-            errors.append(f"{url} GET -> {type(e).__name__}: {e}")
-
-    print("WARNING: OpenStreetMap Overpass enrichment unavailable; skipped.")
     for err in errors:
         print("  ", err)
-    return []
+    return None
 
 def load_osm_amenities(sa2, cache_dir):
-    cache = cache_dir / "osm_victoria_amenities.json"
-    if cache.exists():
-        try:
-            elems = json.loads(cache.read_text())
-        except Exception:
-            elems = []
-    else:
-        # Use Victoria SA2 extent. Overpass is an optional enrichment:
-        # network/API failure must never stop the master-table build.
-        minx, miny, maxx, maxy = sa2.total_bounds
-        elems = overpass_bbox_query(miny, minx, maxy, maxx)
-        if elems:
+    """
+    Amenity points for every OSM_AMENITIES category, cached per category so a
+    failed category is retried on the next run without refetching the rest.
+    """
+    minx, miny, maxx, maxy = sa2.total_bounds
+    rows = []
+    for label, tags in OSM_AMENITIES.items():
+        cache = cache_dir / f"osm_{label}.json"
+        elems = None
+        if cache.exists():
+            try:
+                elems = json.loads(cache.read_text())
+            except Exception:
+                elems = None
+        if elems is None:
+            print(f"Fetching OSM {label}...")
+            elems = overpass_bbox_query(tags, miny, minx, maxy, maxx)
+            if elems is None:
+                # Overpass is optional: a failed category must not stop the build.
+                print(f"WARNING: OSM {label} unavailable; skipped.")
+                continue
             cache.write_text(json.dumps(elems))
 
-    if not elems:
-        return pd.DataFrame(
-            columns=["amenity_type", "amenity_lat", "amenity_lon"]
-        )
+        for e in elems:
+            lat = e.get("lat", e.get("center", {}).get("lat"))
+            lon = e.get("lon", e.get("center", {}).get("lon"))
+            if lat is not None and lon is not None:
+                rows.append({"amenity_type": label, "amenity_lat": lat, "amenity_lon": lon})
 
-    rows = []
-    for e in elems:
-        lat = e.get("lat", e.get("center", {}).get("lat"))
-        lon = e.get("lon", e.get("center", {}).get("lon"))
-        if lat is None or lon is None:
-            continue
-        tags = e.get("tags", {})
-        cat = None
-        for label, pairs in OSM_AMENITIES.items():
-            if any(tags.get(k) == v for k,v in pairs):
-                cat = label
-                break
-        if cat:
-            rows.append({"amenity_type":cat,"amenity_lat":lat,"amenity_lon":lon})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["amenity_type", "amenity_lat", "amenity_lon"])
 
 
 # ---------------------------------------------------------------------
-# ADDITIONAL SOURCE REGISTRY / BEST-EFFORT ENRICHMENT
+# SOURCE COVERAGE AND SQM RENT INDEX
 # ---------------------------------------------------------------------
-
-# These sources are recorded explicitly even when their public delivery format
-# changes. source_coverage.csv records whether each enrichment succeeded.
-EXTRA_SOURCE_PAGES = {
-    "DFFH Rental Report": "https://www.dffh.vic.gov.au/publications/rental-report",
-    "Victorian Property Sales Report": "https://discover.data.vic.gov.au/dataset/victorian-property-sales-report-median-house-by-suburb-time-series",
-    "Crime Statistics Victoria": "https://www.crimestatistics.vic.gov.au/crime-statistics/latest-victorian-crime-data/download-data",
-    "School Zones": "https://discover.data.vic.gov.au/dataset/?q=school+zones",
-    "PTV Timetable API": "https://discover.data.vic.gov.au/dataset/ptv-timetable-api",
-    "Vicmap Features of Interest": "https://discover.data.vic.gov.au/dataset/vicmap-features-of-interest-rest-api",
-    "Digital Atlas of Australia": "https://digital.atlas.gov.au/",
-    "ABS Building Approvals": "https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release",
-    "ABS CPI": "https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/consumer-price-index-australia/latest-release",
-    "ASGS 2026": "https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/latest-release",
-}
-
-DATAVIC_CKAN = "https://discover.data.vic.gov.au/api/3/action/package_search"
-
-def datavic_find_resources(query):
-    """Discover current DataVic machine-readable resources instead of hard-coding fragile URLs."""
-    try:
-        data = get_json(DATAVIC_CKAN, params={"q": query, "rows": 20}, timeout=60)
-        results = data.get("result", {}).get("results", [])
-        resources = []
-        for pkg in results:
-            for r in pkg.get("resources", []):
-                url = r.get("url")
-                fmt = str(r.get("format", "")).lower()
-                if url:
-                    resources.append({
-                        "package": pkg.get("title", ""),
-                        "name": r.get("name", ""),
-                        "format": fmt,
-                        "url": url,
-                    })
-        return resources
-    except Exception as e:
-        print(f"WARNING: DataVic discovery failed for {query}: {e}")
-        return []
 
 def record_extra_source_status(coverage, name, status, detail=""):
     coverage.append({
@@ -1129,11 +1040,13 @@ def add_sqm_market_features(master, sqm, coverage, tolerance_days=31):
             default=np.nan,
         )
 
-    if "weekly_rent" in master.columns:
-        master["rent_vs_sqm_market"] = (
-            pd.to_numeric(master["weekly_rent"], errors="coerce")
-            / master["sqm_market_rent"]
-        )
+    # The five raw series and their YoY changes are only inputs to the type-matched
+    # columns above: for any one listing, four of the five are the wrong property
+    # type. sqm_week is date_listed minus the lag, and the series label is a
+    # restatement of property_type.
+    raw_cols = ["sqm_week", "sqm_market_series"]
+    raw_cols += [f"sqm_{c}" for c in value_cols]
+    master = master.drop(columns=[c for c in raw_cols if c in master.columns])
 
     n_matched = int(master["sqm_market_rent"].notna().sum())
     record_extra_source_status(
@@ -1447,6 +1360,10 @@ def add_crime_features(master, crime, coverage, tolerance_days=370):
 
     out.index = master.index
     master = pd.concat([master, out], axis=1)
+    # Incidents are rate x population, and the ambiguity flag is only useful as a
+    # count in the coverage note below.
+    n_ambiguous = int(master["crime_sal_ambiguous"].fillna(0).sum())
+    master = master.drop(columns=["crime_suburb_incidents", "crime_sal_ambiguous"])
 
     n_suburb = int(left["sal_code"].notna().sum())
     n_rate = int(master["crime_suburb_rate_per_1k"].notna().sum())
@@ -1456,71 +1373,96 @@ def add_crime_features(master, crime, coverage, tolerance_days=370):
         f"as-of join on (suburb, date_listed), tolerance {tolerance_days}d, "
         f"data to year ending {latest:%b %Y}; "
         f"{n_suburb:,}/{len(master):,} listings matched an ABS suburb and "
-        f"{n_rate:,} carry a suburb rate",
+        f"{n_rate:,} carry a suburb rate; {n_ambiguous:,} matched an ambiguous "
+        f"suburb name to its more populous candidate",
     )
     return master
 
 
-def add_market_benchmark_features(master):
-    """
-    Create leakage-safe benchmark variables from already joined official area data.
-    DFFH/property-sales files are discovered below and retained as source metadata;
-    they are not silently joined when only suburb-level time series are available,
-    because a fuzzy suburb-to-SA2 join can misassign observations.
-    """
-    if "census_median_rent_weekly" in master.columns:
-        master["rent_vs_2021_census_median"] = (
-            master["weekly_rent"] /
-            pd.to_numeric(master["census_median_rent_weekly"], errors="coerce")
-        )
-    return master
+# ---------------------------------------------------------------------
+# LISTING FEATURES
+# ---------------------------------------------------------------------
 
-def discover_extra_sources(coverage, cache_dir):
-    """
-    Discover the remaining requested public sources and save a manifest.
-    This keeps the pipeline reproducible even when DataVic changes resource URLs.
-    """
-    queries = {
-        "Victorian Property Sales Report": "Victorian Property Sales Report median house suburb time series",
-        "School Zones": "school zones",
-        "PTV Timetable": "PTV timetable API",
-        "Vicmap Features of Interest": "Vicmap Features of Interest REST API",
-    }
-    manifest = []
-    for name, q in queries.items():
-        resources = datavic_find_resources(q)
-        if resources:
-            record_extra_source_status(coverage, name, "discovered",
-                                       f"{len(resources)} current DataVic resources found")
-            for r in resources:
-                manifest.append({"source": name, **r})
-        else:
-            record_extra_source_status(coverage, name, "not_discovered",
-                                       "No current machine-readable DataVic resource found")
+# Domain's structured_features holds 571 distinct free-text labels, many of them
+# synonyms ("Balcony / Deck", "Balcony"; four spellings of split-system air con).
+# Each flag below gathers the labels that mean the same thing. "Close to shops"
+# and similar agent claims are left out: the measured distances cover them.
+STRUCTURED_FEATURE_FLAGS = {
+    "built_in_wardrobes": r"built.?in wardrobe",
+    "heating": r"heating|fireplace|heater",
+    "air_conditioning": r"air.?con|cooling",
+    "dishwasher": r"dishwasher",
+    "secure_parking": r"secure parking|garage|carport",
+    "internal_laundry": r"internal laundry",
+    "balcony": r"balcony|deck|terrace",
+    "outdoor_space": r"garden|courtyard|outdoor entertain|fully fenced|backyard",
+    "floorboards": r"floorboard|timber floor",
+    "bath": r"^bath(?:tub)?$",
+    "ensuite": r"ensuite",
+    "study": r"study",
+    "furnished": r"^(?:fully |partly |partially )?furnished",
+    "pets_allowed": r"pets? allowed|pet friendly",
+    "pool": r"swimming pool|^pool$|pool.?(?:in.?ground|above)",
+    "gym": r"\bgym\b",
+    "solar": r"solar",
+    "security": r"intercom|alarm|security",
+}
 
-    # Sources that are intentionally represented as contextual/forecast sources.
-    record_extra_source_status(
-        coverage, "DFFH Rental Report", "contextual",
-        "Official signed-rent benchmark; avoid using same-period suburb median as a direct predictor of listing rent."
-    )
-    record_extra_source_status(
-        coverage, "ABS CPI Melbourne rents", "contextual",
-        "Melbourne-wide quarterly time-series covariate; useful for temporal forecasting, not cross-sectional SA2 differentiation."
-    )
-    record_extra_source_status(
-        coverage, "ASGS 2026 correspondence", "contextual",
-        "Needed when producing future outputs on 2026 geography; current Census/SEIFA joins remain on ASGS 2021."
-    )
-    record_extra_source_status(
-        coverage, "Digital Atlas of Australia", "discovered",
-        "Source registered for future attribute selection; do not ingest arbitrary attributes without defining the modelling variable."
-    )
-    record_extra_source_status(
-        coverage, "ABS Building Approvals", "available",
-        "ABS publishes SA2 small-area approvals; registered as a forecast/supply covariate."
+def add_structured_feature_flags(p):
+    """
+    One 0/1 column per STRUCTURED_FEATURE_FLAGS entry, replacing the raw text.
+
+    A listing with no feature list gets <NA> in every flag rather than 0: the
+    agent not filling the field says nothing about whether it has a dishwasher.
+    """
+    if "structured_features" not in p.columns:
+        return p
+    raw = p["structured_features"]
+    tokens = raw.fillna("").astype(str).str.split(r",\s*").explode().str.strip().str.lower()
+    for name, pattern in STRUCTURED_FEATURE_FLAGS.items():
+        hit = tokens.str.contains(pattern, regex=True).groupby(level=0).any()
+        p[f"feat_{name}"] = hit.astype("Int8").where(raw.notna())
+    return p.drop(columns="structured_features")
+
+# Columns computed from weekly_rent. They go to vic_property_rent_ratios.csv, not
+# the master table, so they cannot end up as predictors of the rent they divide.
+# bond is here too: it is set from the rent, almost always one month of it.
+TARGET_DERIVED_COLS = [
+    "bond",
+    "rent_per_bedroom",
+    "rent_vs_2021_census_median",
+    "rent_vs_sqm_market",
+    "rent_to_area_median_hh_income_pct",
+]
+
+# A Victorian bond is capped at one month's rent unless rent exceeds $900/week,
+# which puts nearly all of them at 4.35 weeks. Outside 2-8 weeks is a data error.
+BOND_WEEKS_RANGE = (2, 8)
+
+def split_target_derived(master):
+    """Return (master without rent-derived columns, those columns by listing_id)."""
+    rent = pd.to_numeric(master["weekly_rent"], errors="coerce").replace(0, np.nan)
+
+    def ratio_to(col):
+        if col not in master.columns:
+            return np.nan
+        return rent / pd.to_numeric(master[col], errors="coerce").replace(0, np.nan)
+
+    ratios = pd.DataFrame({"listing_id": master["listing_id"]})
+    if "bond" in master.columns:
+        weeks = pd.to_numeric(master["bond"], errors="coerce") / rent
+        ratios["bond"] = master["bond"].where(weeks.between(*BOND_WEEKS_RANGE))
+    if "bedrooms" in master.columns:
+        ratios["rent_per_bedroom"] = ratio_to("bedrooms")
+    ratios["rent_vs_2021_census_median"] = ratio_to("census_median_rent_weekly")
+    ratios["rent_vs_sqm_market"] = ratio_to("sqm_market_rent")
+    # Affordability for Q3: listing rent against the area's weekly household income.
+    ratios["rent_to_area_median_hh_income_pct"] = 100 * ratio_to(
+        "census_median_household_income_weekly"
     )
 
-    pd.DataFrame(manifest).to_csv(cache_dir.parent / "extra_source_manifest.csv", index=False)
+    master = master.drop(columns=[c for c in TARGET_DERIVED_COLS if c in master.columns])
+    return master, ratios
 
 # ---------------------------------------------------------------------
 # MAIN
@@ -1528,7 +1470,8 @@ def discover_extra_sources(coverage, cache_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    default_input = Path(__file__).resolve().parent.parent / "data" / "raw" / "vic_rentals_all.csv"
+    # Same file fetch_sqm_rents.py reads its postcodes from.
+    default_input = Path(__file__).resolve().parents[2] / "domain" / "Data" / "vic_rentals_all.csv"
     ap.add_argument("--input", default=str(default_input))
     default_output = Path(__file__).resolve().parent.parent / "data" / "processed"
     ap.add_argument("--output-dir", default=str(default_output))
@@ -1556,11 +1499,12 @@ def main():
     # 1. Property table ------------------------------------------------
     p = pd.read_csv(args.input)
 
-    # Drop scraper/admin/low-information fields.
+    # Drop scraper/admin/low-information fields. secondary_type is left out
+    # because it equals property_type on every listing.
     keep = [
         "listing_id","suburb","postcode","weekly_rent","bond","available_date",
         "date_listed","days_listed","bedrooms","bathrooms","carspaces",
-        "property_type","address","lat","lon","primary_type","secondary_type",
+        "property_type","address","lat","lon","primary_type",
         "structured_features","url"
     ]
     p = p[[c for c in keep if c in p.columns]].copy()
@@ -1572,10 +1516,7 @@ def main():
         if c in p:
             p[c] = pd.to_datetime(p[c], errors="coerce")
 
-    # Useful engineered listing variables.
-    p["rent_per_bedroom"] = p["weekly_rent"] / p["bedrooms"].replace(0, np.nan)
-    p["has_carspace"] = (p["carspaces"].fillna(0) > 0).astype("int8")
-    p["has_structured_features"] = p["structured_features"].notna().astype("int8")
+    p = add_structured_feature_flags(p)
 
     # 2. Geographic join ----------------------------------------------
     sa2 = load_sa2()
@@ -1599,9 +1540,7 @@ def main():
     # because pandas will infer float64 and then reject SA2 codes such as "212021453".
     geo_string_cols = [
         "sa2_code_2021","sa2_name_2021",
-        "sa3_code_2021","sa3_name_2021",
-        "sa4_code_2021","sa4_name_2021",
-        "gccsa_code_2021","gccsa_name_2021"
+        "sa3_name_2021","sa4_name_2021","gccsa_name_2021"
     ]
     geo_numeric_cols = ["area_albers_sqkm"]
 
@@ -1754,10 +1693,6 @@ def main():
         suffixes=("","_area"),
     )
 
-    # Register/discover the remaining requested public sources.
-    discover_extra_sources(coverage, cache)
-    master = add_market_benchmark_features(master)
-
     # 7b. SQM postcode rent index, as of each listing's date_listed ----
     if args.no_sqm:
         record_extra_source_status(
@@ -1790,41 +1725,24 @@ def main():
                 coverage, "Crime Statistics Victoria", "failed", str(e)
             )
 
-    # Simple affordability signal (listing rent vs Census median household income).
-    if "census_median_household_income_weekly" in master:
-        master["rent_to_area_median_hh_income_pct"] = (
-            100 * master["weekly_rent"] /
-            pd.to_numeric(master["census_median_household_income_weekly"], errors="coerce")
-        )
-
     # Avoid duplicate area-name columns if any.
     master = master.loc[:, ~master.columns.duplicated()].copy()
 
-    # Final cleanup: remove obsolete/redundant columns.
-    drop_cols = [
-        "sa2_name_2021_area",
-        "sa3_code_2021_area",
-        "sa3_name_2021_area",
-        "sa4_code_2021_area",
-        "sa4_name_2021_area",
-        "gccsa_code_2021_area",
-        "gccsa_name_2021_area",
-        "area_albers_sqkm_area",
-        "state_code_2021",
-        "state_name_2021",
-        "shape",
-        "vif_population_2036",
-        "vif_population_growth_pct_2026_36",
-        "area_km2",
-        "has_carspace",
-        "has_structured_features",
-    ]
-    master = master.drop(columns=[c for c in drop_cols if c in master.columns], errors="ignore")
+    # SA2 attributes arrive twice, once from the spatial join and once with the
+    # SA2 master; drop the second copy and the SA2 master's geometry column.
+    master = master.drop(
+        columns=[c for c in master.columns if c.endswith("_area")] + ["shape"],
+        errors="ignore",
+    )
+
+    # Rent-derived columns leave the modelling table (see TARGET_DERIVED_COLS).
+    master, rent_ratios = split_target_derived(master)
 
     # 8. Outputs -------------------------------------------------------
     master.to_csv(outdir / "vic_property_master.csv", index=False)
     sa2_master.to_csv(outdir / "sa2_master.csv", index=False)
     sa2_yearly.to_csv(outdir / "sa2_yearly.csv", index=False)
+    rent_ratios.to_csv(outdir / "vic_property_rent_ratios.csv", index=False)
     pd.DataFrame(coverage).to_csv(outdir / "source_coverage.csv", index=False)
 
     print(f"Wrote {len(master):,} listings to {outdir/'vic_property_master.csv'}")
