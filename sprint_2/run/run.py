@@ -5,9 +5,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 script = HERE / "build_master_dataset.py"
 
-cmd = [sys.executable, str(script)]
-if "--no-osm" in sys.argv:
-    cmd.append("--no-osm")
+# Pass everything straight through, so --no-osm, --no-sqm, --no-crime and the
+# tolerance flags all work from here without this wrapper needing to know them.
+cmd = [sys.executable, str(script), *sys.argv[1:]]
 
 print("Building Victorian rental master dataset...")
 subprocess.run(cmd, check=True)
