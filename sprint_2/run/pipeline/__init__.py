@@ -9,4 +9,5 @@ Modules behind build_master_dataset.py, one per source family:
     sqm          SQM Research weekly postcode rent index
     crime        Crime Statistics Victoria suburb rates
     routing      OpenRouteService driving routes
+    land         Vicmap Property land size of each listing's lot
 """

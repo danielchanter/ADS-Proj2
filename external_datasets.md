@@ -48,6 +48,8 @@ The supplied Domain data is a single snapshot (scraped 2025-09-09; 93% of listin
 
 - [OpenStreetMap (downloadable)](https://download.geofabrik.de/australia-oceania/australia/victoria.html)[OpenStreetMap (API)](https://overpass-turbo.eu) Parks, supermarkets, shopping centres, cafés, restaurants, bars, gyms, childcare, hospitals, GPs, libraries
 
+- [Vicmap Property](https://discover.data.vic.gov.au/dataset/vicmap-property) **Joined.** Property polygons from the `Vicmap_Property` ArcGIS FeatureServer, matched to each listing's coordinates. Produces `land_m2` (the lot's area, empty on strata lots) and `land_lot_shared`. Replaces Domain's `land_area`, which is almost always empty. See `sprint_2/README.md`.
+
 - [Vicmap as a Service](https://discover.data.vic.gov.au/dataset/vicmap-as-a-service-vaas) REST API for Features of Interest and Geomarks. There are a lot more but too lazy to check if the rest are relevant (someone please do)
 
 ### Transport

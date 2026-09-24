@@ -15,7 +15,8 @@ python sprint_2/run/run.py
 
 `run.py` wraps `run/build_master_dataset.py`, which wires together one module
 per source family under `run/pipeline/`: `listings`, `abs_sources`, `access`
-(schools, stations, tram and bus stops, OSM), `sqm`, `crime` and `routing` (ORS), with shared
+(schools, stations, tram and bus stops, OSM), `sqm`, `crime`, `routing` (ORS)
+and `land` (Vicmap Property), with shared
 helpers in `common` and `geo`.
 
 OpenStreetMap amenities are now included by default. If Overpass is unavailable
@@ -162,6 +163,7 @@ Core joins:
 - SQM Research weekly postcode rent index (as-of join, see above)
 - Crime Statistics Victoria, suburb level (as-of join, see above)
 - OpenRouteService driving distance/time to the CBD and nearest station (see below)
+- Vicmap Property: land size of the lot each listing sits on (see below)
 
 Candidate sources not joined yet. Each needs a period or geographic
 correspondence defined before it can be joined without presenting suburb/LGA
@@ -374,3 +376,48 @@ How it works:
   offending location is isolated, and only that one is left null.
 
 `--no-ors` skips routing even when a key is set.
+
+## Land size (Vicmap Property)
+
+Domain's `land_area` field is filled for 2 of 12,717 listings, and the listing
+pages can no longer be re-scraped: they are a year old and Domain answers
+automated requests with 403. Land size is taken instead from **Vicmap Property**,
+the state's open property map, which has a polygon for every rateable property
+in Victoria. Each listing's coordinates are matched to the polygon they fall in,
+and the polygon's area is measured in VicGrid (EPSG:7899). Where Domain did give
+a land size, the two agree: 533 m² against 530 m², and 185 m² against 189 m².
+
+| Column | Meaning |
+| --- | --- |
+| `land_m2` | area of the lot the listing sits on; empty on a shared lot |
+| `land_lot_shared` | 1 when the lot is shared with other dwellings (strata apartments and townhouses), 0 when the dwelling has its own lot |
+
+How it works:
+
+- **The listing's lot is the smallest polygon around it.** A subdivided lot sits
+  inside the larger parent parcel it was cut from, and a point inside it
+  intersects both.
+- **Strata lots are detected, not guessed from `property_type`.** Vicmap stores
+  a strata building as one identical polygon per unit, each the size of the whole
+  building's lot (190 of them at one Chapel Street address). Two or more
+  containing polygons within 1% of the smallest mark the lot as shared. A unit
+  has no land of its own, so `land_m2` is left empty rather than given the
+  building's lot area.
+- **Listings are looked up once per location**, 25 to a request, with
+  coordinates rounded to 5 dp. Results are cached in
+  `_cache/vicmap_property_land.json` after every request, so a rerun makes no
+  requests and a failed batch is retried on the next run. The first run takes
+  about 30 minutes. `--no-land` skips it.
+
+Things worth knowing:
+
+- **Apartments can have land.** Units in a small block that has been subdivided
+  into separate titles each have their own lot, and they are kept with their
+  own land size.
+- **A development that has not been strata-subdivided yet** shows up as one
+  unshared lot, so an off-the-plan apartment can get the whole site's area.
+- **Listings geocoded onto a road or reserve** fall outside every property
+  polygon and get nulls in both columns.
+- **Floor area is not included.** No open Victorian dataset records it.
+  Building footprints (Microsoft or Overture) would give ground-floor area only,
+  and would miss upper storeys.

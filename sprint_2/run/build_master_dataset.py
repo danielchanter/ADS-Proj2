@@ -29,6 +29,7 @@ Core enrichments:
   * OpenRouteService driving distance/time to the CBD (Flinders St) and the
     nearest train station. Needs ORS_API_KEY set; without it only the
     straight-line cbd_km is added.
+  * Vicmap Property polygons: land size of the lot each listing sits on
 
 Install:
     pip install pandas geopandas shapely requests pyogrio openpyxl scipy
@@ -64,6 +65,7 @@ from pipeline.access import (
 from pipeline.crime import add_crime_features, build_crime_reference
 from pipeline.crime import SOURCE_NAME as CRIME_SOURCE
 from pipeline.geo import add_point_access
+from pipeline.land import add_land_features
 from pipeline.listings import join_sa2, load_listings, split_target_derived
 from pipeline.routing import add_ors_route_features
 from pipeline.sqm import SQM_RENTS_CSV, add_sqm_market_features, load_sqm_weekly_rents
@@ -90,6 +92,8 @@ def parse_args():
                     help="Skip OpenRouteService driving routes (straight-line cbd_km is still added).")
     ap.add_argument("--ors-station-candidates", type=int, default=3,
                     help="Straight-line-nearest stations to route to when finding the road-nearest one.")
+    ap.add_argument("--no-land", action="store_true",
+                    help="Skip the Vicmap Property land-size lookup.")
     return ap.parse_args()
 
 
@@ -236,13 +240,19 @@ def main():
         station_candidates=args.ors_station_candidates,
     )
 
-    # 5. Optional OSM --------------------------------------------------
+    # 5. Land size of each listing's lot (Vicmap Property) --------------
+    if args.no_land:
+        record_source(coverage, "Vicmap Property land size", "skipped", "--no-land")
+    else:
+        listings = add_land_features(listings, coverage, cache)
+
+    # 6. Optional OSM --------------------------------------------------
     if not args.no_osm:
         osm = load_osm_amenities(sa2, cache)
         if not osm.empty:
             listings, sa2_master = add_osm_access(listings, sa2_master, sa2, osm)
 
-    # 6. SA2 master onto listings, then the as-of joins ---------------
+    # 7. SA2 master onto listings, then the as-of joins ---------------
     master = listings.drop(columns="geometry").merge(
         sa2_master,
         on="sa2_code_2021",
@@ -264,7 +274,7 @@ def main():
     # Rent-derived columns leave the modelling table (see TARGET_DERIVED_COLS).
     master, rent_ratios = split_target_derived(master)
 
-    # 7. Outputs -------------------------------------------------------
+    # 8. Outputs -------------------------------------------------------
     write_outputs(outdir, master, sa2_master, sa2_yearly, rent_ratios, coverage)
 
 
