@@ -10,7 +10,7 @@
 
 ### Routing
 
-- [OpenRouteService](https://account.heigit.org/manage/key)
+- [OpenRouteService](https://account.heigit.org/manage/key) **Joined.** `driving-car` matrix API, key read from the `ORS_API_KEY` environment variable. Produces `cbd_drive_km`/`cbd_drive_min` (to Flinders Street Station) and `nearest_train_station_drive_km`/`nearest_train_station_drive_min` (road-nearest of the 3 straight-line-nearest stations). About 60 requests for the whole dataset, cached in `_cache/ors_driving_matrix.json`. See `sprint_2/README.md`.
 
 ### Nice to have's
 

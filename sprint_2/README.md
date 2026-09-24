@@ -1,4 +1,4 @@
-# Sprint 2 — Victorian Rental Data Pipeline
+# Sprint 2: Victorian Rental Data Pipeline
 
 This folder builds the enriched Victorian rental-property master table from the
 raw Domain rental listings.
@@ -13,6 +13,11 @@ pip install -r sprint_2/requirements.txt
 python sprint_2/run/run.py
 ```
 
+`run.py` wraps `run/build_master_dataset.py`, which wires together one module
+per source family under `run/pipeline/`: `listings`, `abs_sources`, `access`
+(schools, stations, OSM), `sqm`, `crime` and `routing` (ORS), with shared
+helpers in `common` and `geo`.
+
 OpenStreetMap amenities are now included by default. If Overpass is unavailable
 or you need a quick run:
 
@@ -24,7 +29,7 @@ python sprint_2/run/run.py --no-osm
 
 The Domain data is a single snapshot scraped 2025-09-09, so it has no rent time
 series. `fetch_sqm_rents.py` pulls the SQM Research Weekly Rents Index for every
-postcode in the Domain data — weekly, per postcode, 2009 to the current week —
+postcode in the Domain data (weekly, per postcode, 2009 to the current week),
 which is what bridges the snapshot to the present:
 
 ```bash
@@ -33,7 +38,7 @@ python sprint_2/run/fetch_sqm_rents.py --postcodes 3168 3000
 ```
 
 Writes `data/external/sqm_weekly_rents.csv` (long format) and a per-postcode
-coverage audit. Use it as a **growth index** anchored on the Domain snapshot —
+coverage audit. Use it as a **growth index** anchored on the Domain snapshot;
 see `external_datasets.md` for the validation against the 2025-09 overlap. SQM data is free for reference use but must not be
 redistributed, so `data/` stays gitignored.
 
@@ -80,24 +85,23 @@ Two things worth knowing:
 ## Crime
 
 Crime Statistics Victoria's **LGA Criminal Incidents** workbook is joined onto
-every listing. Nothing needs to be run first — the pipeline finds the current
+every listing. Nothing needs to be run first: the pipeline finds the current
 workbook on CSA's download page, caches it under `data/processed/_cache/`, and
 uses one of its sheets:
 
-- **Table 03** — incidents by postcode, suburb and offence division. CSA
+- **Table 03**: incidents by postcode, suburb and offence division. CSA
   publishes raw counts with no denominator, so the pipeline divides by the ABS
   Census 2021 suburb (SAL) population to get a rate.
 
 Flags: `--no-crime` to skip, `--crime-xlsx` to point at a workbook you already
-have, `--crime-tolerance-days` (default 370) to change how stale a matched
-reporting period may be.
+have. A matched reporting period may be at most 370 days stale.
 
 ### How it joins
 
 CSA reports rolling years labelled by the month they end in, so "2025, year
 ending March" covers 2024-04-01 to 2025-03-31. Each listing gets the most recent
-period that had **already closed** when it was advertised — a backward as-of
-join on `date_listed`, the same shape as the SQM join. A listing from mid-2024
+period that had **already closed** when it was advertised. This is a backward
+as-of join on `date_listed`, the same shape as the SQM join. A listing from mid-2024
 therefore gets the year ending March 2024, since the year ending March 2025 was
 still in progress.
 
@@ -110,7 +114,7 @@ Columns added, all prefixed `crime_`:
 | Column | Meaning |
 | --- | --- |
 | `crime_suburb_population` | the suburb's Census 2021 population, the rate's denominator |
-| `crime_suburb_rate_per_1k` | incidents per 1,000 residents — the headline suburb measure |
+| `crime_suburb_rate_per_1k` | incidents per 1,000 residents, the headline suburb measure |
 | `crime_suburb_{person,property,drug,public_order,justice,other}_rate_per_1k` | the same rate split by offence division |
 | `crime_suburb_rate_yoy_pct`, `crime_suburb_rate_3yr_change_pct` | whether the suburb is getting better or worse |
 
@@ -118,7 +122,7 @@ Four things worth knowing:
 
 - **Incidents are counted where they happen, and the denominator is residents.**
   Mostly industrial or commercial suburbs therefore show very high rates.
-  Dandenong South records 695 incidents against 125 residents — 5,560 per 1,000.
+  Dandenong South records 695 incidents against 125 residents, or 5,560 per 1,000.
   The same effect is real signal in a CBD (Melbourne 348, Geelong 508, Bendigo
   371 per 1,000), so the rate is kept as computed. Handle it at modelling time:
   `np.log1p` the rates for linear models, and use `crime_suburb_population` to
@@ -132,7 +136,7 @@ Four things worth knowing:
   nulls. The 370-day tolerance is one reporting
   period plus slack.
 - **Suburb counts are summed across postcodes.** CSA splits a few suburbs over
-  two postcodes — Beaumaris files 3,070 incidents under 3193 and 24 under 3192.
+  two postcodes: Beaumaris files 3,070 incidents under 3193 and 24 under 3192.
   The ABS population covers the whole suburb, so the incidents are totalled to
   the whole suburb to match.
 
@@ -157,21 +161,22 @@ Core joins:
 - OpenStreetMap amenities
 - SQM Research weekly postcode rent index (as-of join, see above)
 - Crime Statistics Victoria, suburb level (as-of join, see above)
+- OpenRouteService driving distance/time to the CBD and nearest station (see below)
 
 Candidate sources not joined yet. Each needs a period or geographic
 correspondence defined before it can be joined without presenting suburb/LGA
 values as exact SA2 measurements:
-- [DFFH Rental Report](https://www.dffh.vic.gov.au/publications/rental-report) —
+- [DFFH Rental Report](https://www.dffh.vic.gov.au/publications/rental-report):
   signed-rent benchmark; avoid a same-period suburb median as a predictor
 - [Victorian Property Sales Report](https://discover.data.vic.gov.au/dataset/victorian-property-sales-report-median-house-by-suburb-time-series)
 - [School Zones](https://discover.data.vic.gov.au/dataset/?q=school+zones)
 - [PTV Timetable API](https://discover.data.vic.gov.au/dataset/ptv-timetable-api)
 - [Vicmap Features of Interest](https://discover.data.vic.gov.au/dataset/vicmap-features-of-interest-rest-api)
-- [ABS Building Approvals](https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release) —
+- [ABS Building Approvals](https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release):
   SA2 small-area approvals, a supply covariate for forecasting
-- [ABS CPI](https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/consumer-price-index-australia/latest-release) —
+- [ABS CPI](https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/consumer-price-index-australia/latest-release):
   Melbourne rents, a Melbourne-wide time series, not an SA2 differentiator
-- [ASGS 2026](https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/latest-release) —
+- [ASGS 2026](https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/latest-release):
   correspondence needed for outputs on 2026 geography
 
 ## What is kept, and what is left out
@@ -197,7 +202,7 @@ one column per piece of information:
 Domain's `structured_features` holds 571 distinct free-text labels, many of
 them synonyms. They are grouped into 18 0/1 flags (`feat_air_conditioning`,
 `feat_pets_allowed`, `feat_furnished`, …) and the raw text is dropped. The
-grouping patterns are `STRUCTURED_FEATURE_FLAGS` in `build_master_dataset.py`.
+grouping patterns are `STRUCTURED_FEATURE_FLAGS` in `run/pipeline/listings.py`.
 The 10% of listings with no feature list get empty flags rather than 0, since a
 blank field says nothing about whether the property has a dishwasher.
 
@@ -247,11 +252,11 @@ so no boundary conversion is needed.
 ## Outputs
 
 `data/processed/`
-- `vic_property_master.csv` — main listing-level table
-- `sa2_master.csv` — SA2-level table
-- `sa2_yearly.csv` — one row per SA2 and year, for the forecasting model
-- `vic_property_rent_ratios.csv` — rent-derived columns, not for use as predictors
-- `source_coverage.csv` — source-by-source join/status audit
+- `vic_property_master.csv`: main listing-level table
+- `sa2_master.csv`: SA2-level table
+- `sa2_yearly.csv`: one row per SA2 and year, for the forecasting model
+- `vic_property_rent_ratios.csv`: rent-derived columns, not for use as predictors
+- `source_coverage.csv`: source-by-source join/status audit
 
 Temporary downloads are cached under `data/processed/_cache/`.
 
@@ -280,15 +285,64 @@ python sprint_2/run/run.py --no-osm
 
 ## Train station access
 
-Train access now uses the Victorian Department of Transport and Planning
-**Public Transport Stops** statewide GeoJSON as the preferred source.
+Train access uses the Victorian Department of Transport and Planning
+**Public Transport Stops** statewide GeoJSON, filtered to `METRO TRAIN` and
+`REGIONAL TRAIN`.
 
-The pipeline filters the stop data to:
-- `METRO TRAIN`
-- `REGIONAL TRAIN`
+Only about a third of those records are stations. The rest are station
+furniture (Park & Ride, Lift, Decision point, Taxi Zone…) and rail replacement
+bus stops, which would otherwise count as "stations" in `train_station_count`.
+The pipeline keeps records named `X Station` or `X Railway Station` and
+collapses each station's platform and entrance records (Southern Cross has 36)
+to one point at their mean. That leaves 320 stations: 226 metro, 94 V/Line-only.
 
 It adds:
-- `nearest_train_station_km` for each rental listing
+- `nearest_train_station_km` for each rental listing (straight line)
 - `train_station_count` for the listing's SA2
 
 The older Metro Train Stations accessibility dataset is only used as a fallback.
+
+## Driving routes (OpenRouteService)
+
+The brief asks for proximity to the CBD and the nearest train station
+"calculated via routes (as travelled by car)". These come from the
+OpenRouteService `driving-car` matrix API. It needs a free key from
+[account.heigit.org](https://account.heigit.org/manage/key), read from the
+`ORS_API_KEY` environment variable:
+
+```bash
+export ORS_API_KEY=your-key-here
+python sprint_2/run/run.py
+```
+
+Without a key the routes are skipped (recorded as `skipped` in
+`source_coverage.csv`) and only the straight-line `cbd_km` is added.
+
+| Column | Meaning |
+| --- | --- |
+| `cbd_km` | straight-line distance to Flinders Street Station; needs no key |
+| `cbd_drive_km`, `cbd_drive_min` | driving distance and time to Flinders Street Station |
+| `nearest_train_station_drive_km`, `nearest_train_station_drive_min` | driving distance and time to the road-nearest train station |
+
+How it works:
+
+- **Listings are routed once per location.** Coordinates are rounded to 5 dp
+  (about 1 m), which turns 12,717 listings into ~11,300 origins.
+- **The road-nearest station is found among the 3 nearest by straight line.**
+  A river or freeway can make the closest station by distance a longer drive
+  than the second closest. Change the number with `--ors-station-candidates`.
+  Distance and time are each the minimum over the candidates, so on rare
+  occasions they come from different stations.
+- **Requests are packed to the 3,500-pair limit.** Neighbouring listings share
+  candidate stations, so a whole Victoria run is about 60 matrix requests,
+  well inside the free plan's daily quota. Requests are spaced to stay under
+  60 a minute, and a `429` waits a minute and retries.
+- **Everything is cached** in `_cache/ors_driving_matrix.json`, saved after
+  each request. A rerun makes no requests, and a run stopped by a quota or
+  network error keeps what it got (status `partial`) and fetches the rest next
+  time.
+- **Unroutable points get nulls.** If ORS rejects a request because one
+  location cannot be placed on the road network, the batch is halved until the
+  offending location is isolated, and only that one is left null.
+
+`--no-ors` skips routing even when a key is set.

@@ -33,25 +33,16 @@ from pathlib import Path
 
 import pandas as pd
 
-HERE = Path(__file__).resolve().parent
-REPO = HERE.parent.parent
-DOMAIN_CSV = REPO / "domain" / "Data" / "vic_rentals_all.csv"
-OUT_DIR = REPO / "data" / "external"
+from pipeline.common import BROWSER_UA, DOMAIN_CSV, EXTERNAL_DIR
+from pipeline.sqm import SQM_VALUE_COLS
 
 URL = "https://sqmresearch.com.au/weekly-rents.php?postcode={pc}&t=1"
-UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-)
 SERIES_RE = re.compile(r'(\[\{"date":.*?\}\])', re.S)
-
-# SQM publishes these five series per postcode.
-VALUE_COLS = ["houses_all", "houses_3", "units_all", "units_2", "combined"]
 
 
 def fetch_postcode(postcode, timeout=40):
     """Return the weekly rent series for one postcode, or None if absent."""
-    req = urllib.request.Request(URL.format(pc=postcode), headers={"User-Agent": UA})
+    req = urllib.request.Request(URL.format(pc=postcode), headers={"User-Agent": BROWSER_UA})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         html = resp.read().decode("utf-8", "ignore")
 
@@ -80,7 +71,7 @@ def main():
     )
     parser.add_argument("--delay", type=float, default=1.5, help="seconds between requests")
     parser.add_argument("--retries", type=int, default=2)
-    parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    parser.add_argument("--out-dir", type=Path, default=EXTERNAL_DIR)
     args = parser.parse_args()
 
     targets = args.postcodes or domain_postcodes()
@@ -137,7 +128,7 @@ def main():
 
     data = pd.concat(frames, ignore_index=True)
     data["date"] = pd.to_datetime(data["date"])
-    for col in VALUE_COLS:
+    for col in SQM_VALUE_COLS:
         data[col] = pd.to_numeric(data[col], errors="coerce")
     data = data.sort_values(["postcode", "date"]).reset_index(drop=True)
 
