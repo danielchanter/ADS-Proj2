@@ -15,7 +15,7 @@ python sprint_2/run/run.py
 
 `run.py` wraps `run/build_master_dataset.py`, which wires together one module
 per source family under `run/pipeline/`: `listings`, `abs_sources`, `access`
-(schools, stations, OSM), `sqm`, `crime` and `routing` (ORS), with shared
+(schools, stations, tram and bus stops, OSM), `sqm`, `crime` and `routing` (ORS), with shared
 helpers in `common` and `geo`.
 
 OpenStreetMap amenities are now included by default. If Overpass is unavailable
@@ -157,7 +157,7 @@ Core joins:
 - ABS Personal Income by SA2, 2016-17 to 2022-23 (see "Yearly SA2 series" below)
 - Victoria in Future 2023
 - Victorian school locations
-- Metro station accessibility (best-effort endpoint)
+- DTP Public Transport Stops: train stations, tram stops and bus stops
 - OpenStreetMap amenities
 - SQM Research weekly postcode rent index (as-of join, see above)
 - Crime Statistics Victoria, suburb level (as-of join, see above)
@@ -301,6 +301,34 @@ It adds:
 - `train_station_count` for the listing's SA2
 
 The older Metro Train Stations accessibility dataset is only used as a fallback.
+
+## Tram and bus stops
+
+The same Public Transport Stops download gives tram stops (`METRO TRAM`) and bus
+stops (`METRO BUS` and `REGIONAL BUS`). Regional coaches and SkyBus are left
+out, since they run a few services a day or only to the airport.
+
+Each direction of a stop is its own record, one on each side of the road, so
+the feed has 1,621 tram records for 987 tram stops. Records are merged into one
+stop when they have the same name and are within 250 m of each other. Name alone
+is not enough: bus stop names repeat across the state, and "Station St/High St"
+is used for stops 180 km apart. That leaves 987 tram stops and 18,383 bus stops,
+of which 18,147 are in Victorian SA2s. The rest are just over the border.
+
+It adds:
+- `nearest_tram_stop_km` and `nearest_bus_stop_km` for each rental listing (straight line)
+- `tram_stop_count` and `bus_stop_count` for the listing's SA2
+
+Two things worth knowing:
+
+- **Trams only run in Melbourne.** Only 88 SA2s have a tram stop. Outside
+  Melbourne, `nearest_tram_stop_km` measures how far away Melbourne's tram
+  network is, which repeats `cbd_km`. Use `np.log1p`, or cap the column, before
+  modelling. Among Melbourne listings, 30% are within 400 m of a tram stop.
+- **Bus stops are everywhere.** 79% of listings are within 400 m of one, so
+  `nearest_bus_stop_km` mostly picks out rural listings. It does not measure how
+  good the bus service is, because the feed has no timetables. Service
+  frequency would need the PTV GTFS timetable.
 
 ## Driving routes (OpenRouteService)
 

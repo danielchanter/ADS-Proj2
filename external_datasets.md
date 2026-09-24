@@ -54,6 +54,8 @@ The supplied Domain data is a single snapshot (scraped 2025-09-09; 93% of listin
 
 - [PTV Timetable API](https://discover.data.vic.gov.au/dataset/ptv-timetable-api) Timetable for metropolitan and regional train, tram, and bus
 
+- [Public Transport Lines and Stops](https://discover.data.vic.gov.au/dataset/public-transport-lines-and-stops) **Joined.** Statewide stop points for every mode. Produces train station, tram stop and bus stop distances and SA2 counts (`nearest_tram_stop_km`, `tram_stop_count`, `nearest_bus_stop_km`, `bus_stop_count`). See `sprint_2/README.md`.
+
 - [Metro Train Stations with Accessibility Information](https://discover.data.vic.gov.au/dataset/metro-train-stations-with-accessibility-information) Locations of train stations and their accessibility information
 
 

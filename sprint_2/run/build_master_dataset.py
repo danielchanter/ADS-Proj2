@@ -20,7 +20,7 @@ Core enrichments:
     2022-23 is joined to listings, every year goes to sa2_yearly.csv
   * Victoria in Future 2023 SA2 projections to 2036
   * Victorian School Locations 2025
-  * Metro train stations accessibility dataset
+  * DTP Public Transport Stops: train stations, tram stops and bus stops
   * Optional OpenStreetMap amenity counts/distances using Overpass
   * SQM Research weekly postcode rent index, joined as-of each listing date
     (run sprint_2/run/fetch_sqm_rents.py first to produce it)
@@ -57,7 +57,10 @@ from pipeline.abs_sources import (
     load_regional_population_yearly, load_sa2, load_seifa, load_vif,
     personal_income_snapshot,
 )
-from pipeline.access import add_osm_access, load_osm_amenities, load_schools, load_stations
+from pipeline.access import (
+    STOP_MODES, add_osm_access, load_osm_amenities, load_schools,
+    load_stations, load_statewide_stops, one_point_per_stop,
+)
 from pipeline.crime import add_crime_features, build_crime_reference
 from pipeline.crime import SOURCE_NAME as CRIME_SOURCE
 from pipeline.geo import add_point_access
@@ -199,17 +202,31 @@ def main():
     sa2_yearly, income_yearly = load_sa2_yearly(cache, coverage)
     sa2_master = build_sa2_master(sa2, income_yearly, cache, coverage)
 
-    # 3. Schools and stations -----------------------------------------
+    # 3. Schools, stations, tram and bus stops ------------------------
     schools = load_schools()
     if not schools.empty:
         listings, sa2_master = add_point_access(
             listings, sa2_master, sa2, schools, "school_lat", "school_lon", "school"
         )
-    stations = load_stations()
+    stops = load_statewide_stops()
+    stations = load_stations(stops)
     if not stations.empty:
         listings, sa2_master = add_point_access(
             listings, sa2_master, sa2, stations, "station_lat", "station_lon", "train_station"
         )
+    stop_counts = [f"{len(stations):,} train stations"]
+    for name, modes in STOP_MODES.items():
+        points = one_point_per_stop(stops[stops["stop_mode"].isin(modes)])
+        if not points.empty:
+            listings, sa2_master = add_point_access(
+                listings, sa2_master, sa2, points, "stop_lat", "stop_lon", f"{name}_stop"
+            )
+        stop_counts.append(f"{len(points):,} {name} stops")
+    record_source(
+        coverage, "DTP Public Transport Stops",
+        "joined" if not stops.empty else "failed",
+        ", ".join(stop_counts),
+    )
 
     # 4. Driving routes to the CBD and nearest station (ORS) ----------
     listings = add_ors_route_features(

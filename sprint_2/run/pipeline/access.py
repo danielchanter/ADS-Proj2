@@ -1,6 +1,6 @@
 """
-Point datasets measured from each listing: schools, train stations and
-OpenStreetMap amenities. Each loader returns one row per point with numeric
+Point datasets measured from each listing: schools, train stations, tram and
+bus stops, and OpenStreetMap amenities. Each loader returns one row per point with numeric
 lat/lon columns.
 """
 
@@ -10,11 +10,15 @@ import io
 import json
 import time
 
+import numpy as np
 import pandas as pd
 import requests
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
+from scipy.spatial import cKDTree
 
 from .common import RESEARCH_UA, get_json
-from .geo import locate_in_sa2, nearest_features
+from .geo import EARTH_RADIUS_KM, locate_in_sa2, nearest_features, sphere_xyz
 
 # ---------------------------------------------------------------------
 # SOURCES
@@ -66,6 +70,84 @@ def load_schools():
     return with_numeric_coords(d, "school_lat", "school_lon")
 
 # ---------------------------------------------------------------------
+# PUBLIC TRANSPORT STOPS
+# ---------------------------------------------------------------------
+
+STOP_COLUMNS = ["stop_id", "stop_name", "stop_mode", "stop_lat", "stop_lon"]
+
+def statewide_stop_urls():
+    """
+    GeoJSON stop resources in the DataVic Public Transport package.
+
+    The URL is discovered from DataVic's CKAN API on every run, so the script
+    is resilient to storage URL changes.
+    """
+    pkg = get_json(
+        DATAVIC_PACKAGE_SHOW,
+        params={"id": PUBLIC_TRANSPORT_DATASET_ID},
+        timeout=60,
+    )
+    urls = []
+    for r in pkg.get("result", {}).get("resources", []):
+        fmt = str(r.get("format", "")).lower()
+        mime = str(r.get("mimetype", "")).lower()
+        name = str(r.get("name", "")).lower()
+        url = r.get("url")
+        if url and "stop" in name and ("geojson" in fmt or "geo+json" in mime):
+            urls.append(url)
+    return urls
+
+def read_statewide_stops(url):
+    """Every point stop in one statewide stops GeoJSON, all modes."""
+    r = requests.get(
+        url,
+        headers={
+            "User-Agent": RESEARCH_UA,
+            "Accept": "application/geo+json, application/json",
+        },
+        timeout=180,
+    )
+    r.raise_for_status()
+
+    rows = []
+    for feat in r.json().get("features", []):
+        props = feat.get("properties", {}) or {}
+        geom = feat.get("geometry", {}) or {}
+        coords = geom.get("coordinates")
+        if geom.get("type") != "Point" or not coords or len(coords) < 2:
+            continue
+
+        lon, lat = coords[0], coords[1]
+        rows.append({
+            "stop_id": props.get("STOP_ID", props.get("stop_id")),
+            "stop_name": props.get("STOP_NAME", props.get("stop_name")),
+            "stop_mode": str(props.get("MODE", props.get("mode", ""))).upper().strip(),
+            "stop_lat": pd.to_numeric(lat, errors="coerce"),
+            "stop_lon": pd.to_numeric(lon, errors="coerce"),
+        })
+    return pd.DataFrame(rows, columns=STOP_COLUMNS).dropna(subset=["stop_lat", "stop_lon"])
+
+def load_statewide_stops():
+    """
+    Department of Transport and Planning statewide Public Transport Stops, every
+    mode. Train stations, tram stops and bus stops are all taken from this one
+    download.
+    """
+    try:
+        for url in statewide_stop_urls():
+            try:
+                d = read_statewide_stops(url)
+            except Exception as e:
+                print(f"WARNING: statewide stops resource failed: {e}")
+                continue
+            if not d.empty:
+                print(f"Loaded {len(d):,} statewide Public Transport Stops.")
+                return d
+    except Exception as e:
+        print(f"WARNING: DataVic stops-resource discovery failed: {e}")
+    return pd.DataFrame(columns=STOP_COLUMNS)
+
+# ---------------------------------------------------------------------
 # TRAIN STATIONS
 # ---------------------------------------------------------------------
 
@@ -99,66 +181,6 @@ def one_point_per_station(d):
          )
     )
 
-def statewide_stop_urls():
-    """
-    GeoJSON stop resources in the DataVic Public Transport package.
-
-    The URL is discovered from DataVic's CKAN API on every run, so the script
-    is resilient to storage URL changes.
-    """
-    pkg = get_json(
-        DATAVIC_PACKAGE_SHOW,
-        params={"id": PUBLIC_TRANSPORT_DATASET_ID},
-        timeout=60,
-    )
-    urls = []
-    for r in pkg.get("result", {}).get("resources", []):
-        fmt = str(r.get("format", "")).lower()
-        mime = str(r.get("mimetype", "")).lower()
-        name = str(r.get("name", "")).lower()
-        url = r.get("url")
-        if url and "stop" in name and ("geojson" in fmt or "geo+json" in mime):
-            urls.append(url)
-    return urls
-
-def read_statewide_stations(url):
-    """Train stations in one statewide stops GeoJSON, one point per station."""
-    r = requests.get(
-        url,
-        headers={
-            "User-Agent": RESEARCH_UA,
-            "Accept": "application/geo+json, application/json",
-        },
-        timeout=180,
-    )
-    r.raise_for_status()
-
-    rows = []
-    for feat in r.json().get("features", []):
-        props = feat.get("properties", {}) or {}
-        geom = feat.get("geometry", {}) or {}
-        coords = geom.get("coordinates")
-
-        mode = str(props.get("MODE", props.get("mode", ""))).upper().strip()
-        if mode not in TRAIN_MODES:
-            continue
-        if geom.get("type") != "Point" or not coords or len(coords) < 2:
-            continue
-
-        lon, lat = coords[0], coords[1]
-        rows.append({
-            "station_id": props.get("STOP_ID", props.get("stop_id")),
-            "station_name": props.get("STOP_NAME", props.get("stop_name")),
-            "station_mode": mode,
-            "station_lat": pd.to_numeric(lat, errors="coerce"),
-            "station_lon": pd.to_numeric(lon, errors="coerce"),
-        })
-
-    d = pd.DataFrame(rows)
-    if d.empty:
-        return d
-    return one_point_per_station(d.dropna(subset=["station_lat", "station_lon"]))
-
 def read_fallback_stations(url):
     """The older Metro Train Stations with Accessibility Information export."""
     r = requests.get(url, params={"delimiter": ","}, timeout=60)
@@ -171,25 +193,17 @@ def read_fallback_stations(url):
     d = d.rename(columns={lat:"station_lat", lon:"station_lon"})
     return with_numeric_coords(d, "station_lat", "station_lon")
 
-def load_stations():
+def load_stations(stops):
     """
-    Preferred source: Department of Transport and Planning statewide
-    Public Transport Stops GeoJSON, keeping METRO TRAIN and REGIONAL TRAIN
-    stop points. This is more complete and more stable than the older City of
-    Melbourne station-export endpoint, which is only the fallback.
+    Train stations from the statewide stops (METRO TRAIN and REGIONAL TRAIN),
+    one point per station. This is more complete and more stable than the older
+    City of Melbourne station-export endpoint, which is only the fallback.
     """
-    try:
-        for url in statewide_stop_urls():
-            try:
-                d = read_statewide_stations(url)
-            except Exception as e:
-                print(f"WARNING: statewide station resource failed: {e}")
-                continue
-            if not d.empty:
-                print(f"Loaded {len(d):,} train stations from statewide Public Transport Stops.")
-                return d
-    except Exception as e:
-        print(f"WARNING: DataVic station-resource discovery failed: {e}")
+    train = stops[stops["stop_mode"].isin(TRAIN_MODES)]
+    if not train.empty:
+        d = one_point_per_station(train.rename(columns=lambda c: c.replace("stop_", "station_")))
+        print(f"Loaded {len(d):,} train stations from statewide Public Transport Stops.")
+        return d
 
     for url in STATIONS_URLS:
         try:
@@ -202,6 +216,52 @@ def load_stations():
 
     print("WARNING: Train station datasets unavailable; station access skipped.")
     return pd.DataFrame(columns=STATION_COLUMNS)
+
+# ---------------------------------------------------------------------
+# TRAM AND BUS STOPS
+# ---------------------------------------------------------------------
+
+# Each entry becomes nearest_<name>_stop_km and <name>_stop_count. Regional
+# coaches and SkyBus are left out: a few services a day, or airport-only.
+STOP_MODES = {
+    "tram": {"METRO TRAM"},
+    "bus": {"METRO BUS", "REGIONAL BUS"},
+}
+
+# The two directions of a tram or bus stop are separate records with the same
+# name, on opposite sides of the road; the furthest-apart tram pair is 160 m.
+SAME_STOP_KM = 0.25
+
+def one_point_per_stop(d):
+    """
+    Collapse the two directions of each stop to one point.
+
+    Stop names repeat across the state ("Station St/High St" is used 180 km
+    apart), so records merge only when they share a name and sit within
+    SAME_STOP_KM of each other.
+    """
+    # 110 bus stops are listed under both METRO BUS and REGIONAL BUS.
+    d = d.drop_duplicates("stop_id").reset_index(drop=True)
+    if d.empty:
+        return d[["stop_name", "stop_lat", "stop_lon"]]
+
+    xyz = sphere_xyz(d["stop_lat"].to_numpy(), d["stop_lon"].to_numpy())
+    pairs = cKDTree(xyz).query_pairs(SAME_STOP_KM / EARTH_RADIUS_KM, output_type="ndarray")
+    names = d["stop_name"].to_numpy()
+    pairs = pairs[names[pairs[:, 0]] == names[pairs[:, 1]]]
+    same_stop = coo_matrix(
+        (np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(d), len(d))
+    )
+    _, stop = connected_components(same_stop, directed=False)
+    return (
+        d.groupby(stop)
+         .agg(
+             stop_name=("stop_name", "first"),
+             stop_lat=("stop_lat", "mean"),
+             stop_lon=("stop_lon", "mean"),
+         )
+         .reset_index(drop=True)
+    )
 
 # ---------------------------------------------------------------------
 # OPENSTREETMAP AMENITIES
