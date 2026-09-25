@@ -18,7 +18,7 @@ SPRINT_DIR = RUN_DIR.parent
 REPO_DIR = SPRINT_DIR.parent
 
 # The supplied Domain snapshot. fetch_sqm_rents.py reads its postcodes from it.
-DOMAIN_CSV = REPO_DIR / "domain" / "Data" / "vic_rentals_all.csv"
+DOMAIN_CSV = SPRINT_DIR / "data" / "raw" / "vic_rentals_all.csv"
 OUTPUT_DIR = SPRINT_DIR / "data" / "processed"
 EXTERNAL_DIR = REPO_DIR / "data" / "external"
 

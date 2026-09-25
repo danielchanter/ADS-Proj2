@@ -312,7 +312,7 @@ def add_crime_features(master, crime, coverage, tolerance_days=370):
         "_row": np.arange(len(master)),
         "suburb_key": suburb_key(master["suburb"]),
         "postcode": pd.to_numeric(master["postcode"], errors="coerce"),
-        "date_listed": pd.to_datetime(master["date_listed"], errors="coerce"),
+        "date_listed": pd.to_datetime(master["date_listed"], errors="coerce").astype("datetime64[ns]"),
     }).dropna(subset=["postcode", "date_listed"])
     left["postcode"] = left["postcode"].astype("int64")
 
