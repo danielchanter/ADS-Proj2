@@ -48,19 +48,36 @@ python sprint_2/run/map_properties.py
 
 Writes to `data/processed/maps/`:
 
-- `property_locations.html`: interactive map. One point per listing on a
-  street map, coloured by advertised weekly rent, with the ABS suburb (SAL)
+- `property_locations.html`: interactive map. One point per listing on a grey
+  base map, coloured by advertised weekly rent, with the ABS suburb (SAL)
   boundaries on top. Hovering a listing shows its address, rent, type and
   rooms; hovering a suburb shows its name, listing count and median rent. Open
   it in a browser.
-- `property_locations.png`: the same points on the suburb boundaries, Victoria
-  beside Greater Melbourne.
+  - The panel on the left is the legend and the filter: untick a rent band, a
+    bedroom count or a property type to hide those listings.
+  - Tick **Suburb median rent** in the layer list (top right) to shade each
+    suburb by its median rent, in the same five colours. Untick **Rental
+    listings** to see the shading on its own.
+  - **Street map** in the layer list swaps the grey base map for
+    OpenStreetMap, which shows parks, shops and stations.
+- `property_locations.png`: the same points on the suburb boundaries, in three
+  panels that zoom in: Victoria, Greater Melbourne, and the 24 km square around
+  the CBD where the listings are too dense to tell apart at the Greater
+  Melbourne scale.
 
 Things worth knowing:
 
 - **Rent is shown in five bands**, not on a continuous scale. `weekly_rent` is
   not cleaned, and a few listings above $5,000 a week would flatten a
   continuous scale. Listings with no rent, or a rent of 0, are grey.
+- **The band colours are evenly spaced samples of viridis**, a perceptually
+  uniform colour map, so each band looks as different from the next as any
+  other pair, and the order still reads in greyscale and with colour-blindness.
+  A higher rent is darker. The yellow end of viridis is left out because it is
+  too faint on the map's light background.
+- **A suburb is shaded only when 5 or more of its listings have a rent**
+  (`MIN_PRICED_FOR_MEDIAN`), which is 377 of the 646 suburbs with a priced
+  listing. Hovering any suburb still gives its median, whatever the count.
 - **4 listings have no coordinates** and are left off.
 - **A suburb's count and median use the listing's Domain suburb**, the same
   `(suburb, postcode)` match that gives the master table its `sal_code_2021`,
@@ -70,11 +87,34 @@ Things worth knowing:
 - **The HTML embeds every listing's address and rent.** The Domain data must
   not be redistributed, so the maps stay under the gitignored `data/`.
 - The suburb boundaries in the HTML are simplified to about 100 m to keep the
-  file under 10 MB, so at street level a boundary can sit slightly off its true
-  line.
+  file to about 10 MB, so at street level a boundary can sit slightly off its
+  true line.
+- **The grey base map is Esri's Light Gray Canvas**, which needs no API key.
+  Its tiles stop at zoom 16, so the map zooms no closer than 17, about a
+  kilometre across the screen.
+- **The suburb names are written by the map, not taken from the base map**,
+  whose own are small, grey and blurred on a high-resolution screen. They are
+  the ABS suburb names, drawn above the listings and the suburb shading with
+  a white outline so they read over both. Untick **Suburb names** in the
+  layer list to hide them.
+  - A name is left out where it would run into another, or sit under the
+    legend: the cities and towns are named first, then the suburbs with the
+    most listings. From further out a name needs more clear space around it,
+    so the state view names the towns and not every suburb of Melbourne.
+  - The cities and towns are in larger, bolder type. A suburb with no
+    listings is named only from zoom 12, smaller and in grey.
+  - A name sits in the widest part of its suburb (the centre of the largest
+    circle that fits inside it). Where the suburb is smaller on screen than
+    the name, the name goes above it instead, clear of its listings.
+  - A long name is written on two lines, as in "Heidelberg / Heights".
+  - At zoom 16 and 17 the base map's own, fainter suburb names also show:
+    they come with its street names and cannot be turned off separately.
+- The HTML loads Leaflet and both base maps from the internet, so it needs a
+  connection to open.
 - The suburb match reads the mesh-block cache under `_cache/`. If the pipeline
   has never run, the first map run downloads it (about 90 MB, an extra minute).
-- `simplify_coverage` needs geopandas 1.1 and shapely 2.1 or newer.
+- `simplify_coverage` needs geopandas 1.1 and shapely 2.1 or newer, and
+  `maximum_inscribed_circle`, which places the names, needs shapely 2.1.
 
 ## Rent time series
 
