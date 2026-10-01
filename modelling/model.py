@@ -9,27 +9,6 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_squared_error, r2_score
 
-# FUNCTIONS
-
-def predict_rent(new_property, model, preprocessor, id_cols):
-    new_property = new_property.drop(
-        columns=id_cols,
-        errors="ignore"
-    )
-
-    new_property_processed = preprocessor.transform(new_property)
-
-    predictions = model.predict(
-        new_property_processed,
-        verbose=0
-    ).flatten()
-
-    return predictions
-
-
-
-
-
 
 # loading data
 base = Path(__file__).resolve().parent.parent
@@ -108,26 +87,6 @@ preprocessor = ColumnTransformer([
 X_train_processed = preprocessor.fit_transform(X_train)
 X_test_processed = preprocessor.transform(X_test)
 
-
-# building the model
-# base line 
-baseline_pred = np.full(
-    len(y_test),
-    y_train.mean()
-)
-
-baseline_rmse = np.sqrt(
-    mean_squared_error(y_test, baseline_pred)
-)
-
-baseline_r2 = r2_score(
-    y_test,
-    baseline_pred
-)
-
-print("Baseline RMSE:", baseline_rmse)
-print("Baseline R²:", baseline_r2)
-
 # actual model
 model = tf.keras.Sequential([
     tf.keras.layers.Input(
@@ -185,6 +144,5 @@ r2 = r2_score(y_test, y_pred)
 # for evaluation purposes
 # print("RMSE:", rmse)
 # print("R²:", r2)
-
 
 
