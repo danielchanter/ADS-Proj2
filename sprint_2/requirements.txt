@@ -1,7 +1,9 @@
 pandas
-geopandas
-shapely
+geopandas>=1.1
+shapely>=2.1
 requests
 pyogrio
 openpyxl
 scipy
+folium
+matplotlib

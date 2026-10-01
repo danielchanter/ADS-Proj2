@@ -24,7 +24,7 @@
 
 The supplied Domain data is a single snapshot (scraped 2025-09-09; 93% of listings are 2025Q3), so it has no usable time series. This is the source that bridges it to the present:
 
-- [SQM Research Weekly Rents Index](https://sqmresearch.com.au/weekly-rents.php?postcode=3168&t=1) Weekly advertised rents **per postcode**, 2009-08 → current week (verified to 2026-09-15). Five series per postcode: `houses_all`, `houses_3`, `units_all`, `units_2`, `combined`. Fetched by `sprint_2/run/fetch_sqm_rents.py` — the series is embedded as JSON in the page HTML, so no API key is needed. Joined onto each listing by `sprint_2/run/build_master_dataset.py` as an as-of match on `(postcode, date_listed)`, producing the `sqm_*` and `rent_vs_sqm_market` columns. Verified 20/20 coverage on a metro+regional sample, including thin rural postcodes.
+- [SQM Research Weekly Rents Index](https://sqmresearch.com.au/weekly-rents.php?postcode=3168&t=1) Weekly advertised rents **per postcode**, 2009-08 → current week (verified to 2026-09-22). Five series per postcode: `houses_all`, `houses_3`, `units_all`, `units_2`, `combined`. Fetched for every Victorian postcode: 668 of the 694 ABS postal areas have a series, home to 99.9% of Victorian dwellings. Fetched by `sprint_2/run/fetch_sqm_rents.py` — the series is embedded as JSON in the page HTML, so no API key is needed. Joined onto each listing by `sprint_2/run/build_master_dataset.py` as an as-of match on `(postcode, date_listed)`, producing the `sqm_*` and `rent_vs_sqm_market` columns. Verified 20/20 coverage on a metro+regional sample, including thin rural postcodes.
   - Why it works here: it **overlaps** the Domain snapshot, so it can be anchored to it rather than spliced blind. At the 2025-09-08 week, SQM medians sit within 0–2% of the Domain medians in postcodes with decent sample sizes (3000, 3029 houses, 3350 houses, 3840). A few postcodes disagree by more. Clayton (3168) is the clearest: SQM reads about 13% higher. That is because Domain's Clayton listings include single rooms rented out in student share-houses, which are cheap and pull Domain's median down, while SQM counts whole properties only. Neither number is wrong — they are counting different things.
   - Licensing: free for personal/reference use, cite SQM Research.
 
@@ -65,7 +65,7 @@ The supplied Domain data is a single snapshot (scraped 2025-09-09; 93% of listin
 
 ### Population forecasts
 
-- [Victoria in Future — Statistical areas (SA2, SA3, SA4, GCCSA)](https://www.planning.vic.gov.au/guides-and-resources/Data-spatial-and-insights/discover-and-access-planning-open-data/victoria-in-future/download-data/statistical-areas-sa2,-sa3,-sa4,-gccsa) Population projections by age, sex, household and dwelling counts in five year increments by statistical areas
+- [Victoria in Future — Statistical areas (SA2, SA3, SA4, GCCSA)](https://www.planning.vic.gov.au/guides-and-resources/Data-spatial-and-insights/discover-and-access-planning-open-data/victoria-in-future/download-data/statistical-areas-sa2,-sa3,-sa4,-gccsa) Population projections by age, sex, household and dwelling counts in five year increments by statistical areas. **Joined.** The SA2 workbook's population, dwelling, household and household-type projections for 2021, 2026, 2031 and 2036 go to `sa2_projections.csv`; the 2026-31 population growth is also on every listing. See `sprint_2/README.md`.
 
 - [VIF2023 — Victoria demographic projections to 2051](https://discover.data.vic.gov.au/dataset/vif2023-victoria-demographic-projections-to-2051) Same as above but for VIC as a whole
 
@@ -73,7 +73,7 @@ The supplied Domain data is a single snapshot (scraped 2025-09-09; 93% of listin
 
 ### Nice to have's
 
-- [ABS Building Approvals](https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release) Dwelling approvals by LGA
+- [ABS Building Approvals](https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release) Dwelling approvals by SA2. **Joined.** Monthly approvals from the ABS Data API (`BA_SA2`, July 2021 onwards on ASGS 2021 boundaries), summed to financial years, go to `sa2_yearly.csv` as `dwellings_approved` and `houses_approved` for 2021-22 to 2025-26. See `sprint_2/README.md`.
 
 - [ABS CPI](https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/consumer-price-index-australia/latest-release) Quarterly rents index for Melbourne
 

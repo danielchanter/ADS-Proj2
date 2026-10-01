@@ -2,7 +2,9 @@
 ABS and Victorian Government area-level sources, all on ASGS 2021 SA2s.
 
 Snapshot tables (one row per SA2) are joined onto every listing; the yearly
-population and income series go to sa2_yearly.csv for the forecasting model.
+population, income and building-approval series go to sa2_yearly.csv, and the
+Victoria in Future projection levels to sa2_projections.csv, for the
+forecasting model.
 """
 
 from __future__ import annotations
@@ -13,7 +15,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .common import arcgis_geojson, cached_download, normalize_code, numeric
+from .common import (
+    arcgis_geojson, arcgis_geojson_paged, cached_download, normalize_code, numeric,
+)
 
 # ---------------------------------------------------------------------
 # SOURCES
@@ -21,6 +25,13 @@ from .common import arcgis_geojson, cached_download, normalize_code, numeric
 
 SA2_URL = (
     "https://geo.abs.gov.au/arcgis/rest/services/ASGS2021/SA2/"
+    "FeatureServer/0/query"
+)
+
+# Suburbs and Localities (SAL) boundaries, used for mapping only. Each listing's
+# suburb is assigned by correspondence.add_suburb_code.
+SAL_BOUNDARY_URL = (
+    "https://geo.abs.gov.au/arcgis/rest/services/ASGS2021/SAL/"
     "FeatureServer/0/query"
 )
 
@@ -44,6 +55,44 @@ VIF_URL = (
     "https://www.planning.vic.gov.au/__data/assets/excel_doc/0028/691660/"
     "VIF2023_SA2_Pop_Hhold_Dwelling_Projections_to_2036_Release_2.xlsx"
 )
+
+# VIF sheets holding several measures, each a block of projection-year columns
+# under its label. Maps sheet -> {label prefix: output column}.
+# Dwellings_and_Households also holds the totals of the three single-measure
+# sheets (population as ERP, dwellings as SPD, households as OPD), so these two
+# sheets cover the whole workbook.
+VIF_PROJECTION_MEASURES = {
+    "Dwellings_and_Households": {
+        "estimated resident population": "vif_population",
+        "persons in non-private dwellings": "vif_persons_non_private_dwellings",
+        "structural private dwellings": "vif_dwellings",
+        "occupied private dwellings": "vif_households",
+    },
+    "Households_by_Type": {
+        "couple family with children": "vif_households_couple_with_children",
+        "couple family without children": "vif_households_couple_no_children",
+        "one-parent family": "vif_households_one_parent",
+        "other family": "vif_households_other_family",
+        "group household": "vif_households_group",
+        "lone person": "vif_households_lone_person",
+    },
+}
+
+# Building Approvals by SA2 from the ABS Data API, monthly from July 2021 on
+# ASGS 2021 boundaries. The key reads measure.sector.work.building.region
+# type.region.frequency: number of dwelling units (1), all sectors (9), all
+# work types (TOT), houses (110) and all building types (TOT), every SA2,
+# monthly. The earlier dataflows (BA_SA2_2016-21, BA_SA2_201116) use 2016 and
+# 2011 boundaries, so the series starts at July 2021.
+BUILDING_APPROVALS_URL = (
+    "https://data.api.abs.gov.au/rest/data/ABS,BA_SA2,2.0.0/"
+    "1.9.TOT.110+TOT.SA2..M?format=csv"
+)
+# Building type code -> output column.
+BUILDING_APPROVALS_COLUMNS = {
+    "TOT": "dwellings_approved",
+    "110": "houses_approved",
+}
 
 # Population estimates by SA2, 30 June 2001 to 2025, on ASGS 2021 boundaries.
 # The ArcGIS layer above only carries the latest two years; this is the history.
@@ -101,6 +150,20 @@ def load_sa2():
     )
     g["sa2_code_2021"] = normalize_code(g["sa2_code_2021"])
     return g
+
+def load_sal_boundaries():
+    """
+    Victorian suburb (SAL) polygons. The two non-spatial suburbs ("No usual
+    address", "Migratory - Offshore - Shipping") have no geometry and are dropped.
+    """
+    g = arcgis_geojson_paged(
+        SAL_BOUNDARY_URL,
+        order_by="sal_code_2021",
+        where="state_code_2021='2'",
+        out_fields="sal_code_2021,sal_name_2021",
+    )
+    g["sal_code_2021"] = normalize_code(g["sal_code_2021"])
+    return g[g.geometry.notna() & ~g.geometry.is_empty].reset_index(drop=True)
 
 def load_gcp():
     # The public SA2 service contains selected General Community Profile variables.
@@ -212,6 +275,73 @@ def load_vif(cache_dir: Path):
     start = numeric(d["2026"]).replace(0, np.nan)
     out["vif_population_growth_pct_2026_31"] = 100 * (numeric(d["2031"]) / start - 1)
     return out
+
+# ---------------------------------------------------------------------
+# PROJECTIONS (one row per SA2 and projection year)
+# ---------------------------------------------------------------------
+
+def read_vif_measures(path: Path, sheet: str, measures: dict):
+    """
+    One multi-measure sheet of the VIF workbook, as one row per SA2 and
+    projection year with a column for each measure in `measures`.
+
+    Each measure's label is written once, one row above its block of year
+    columns, so it is forward-filled across the block. Every column is matched
+    on its own label and year, so blocks sharing the same year headers stay
+    separate.
+    """
+    raw = pd.read_excel(path, sheet_name=sheet, header=None)
+
+    def is_code_label(x):
+        return "sa2" in str(x).lower() and "code" in str(x).lower()
+
+    header_i = next(
+        i for i in range(min(len(raw), 30)) if any(map(is_code_label, raw.iloc[i]))
+    )
+    header = raw.iloc[header_i]
+    labels = raw.iloc[header_i - 1].ffill()
+    code_col = next(j for j in raw.columns if is_code_label(header[j]))
+
+    # The sheet also lists SA3, SA4, GCCSA and state rows; they have no SA2 code.
+    body = raw.iloc[header_i + 1:]
+    body = body[normalize_code(body[code_col]).str.fullmatch(r"2\d{8}")]
+    codes = normalize_code(body[code_col]).to_numpy()
+
+    frames = []
+    for j in raw.columns:
+        label = str(labels[j]).strip().lower()
+        column = next((v for k, v in measures.items() if label.startswith(k)), None)
+        year = str(header[j]).strip().removesuffix(".0")
+        if column is None or not re.fullmatch(r"\d{4}", year):
+            continue
+        frames.append(pd.DataFrame({
+            "sa2_code_2021": codes,
+            "year": int(year),
+            "measure": column,
+            "value": numeric(body[j]).to_numpy(),
+        }))
+
+    d = pd.concat(frames, ignore_index=True).pivot(
+        index=["sa2_code_2021", "year"], columns="measure", values="value",
+    )
+    d.columns.name = None
+    return d[list(measures.values())].reset_index()
+
+def load_vif_projections(cache_dir: Path):
+    """
+    VIF 2023 projections per SA2 at 30 June 2021, 2026, 2031 and 2036, one row
+    per SA2 and year: population, persons in non-private dwellings, dwellings,
+    households, and households by type. 2021 is the base year.
+
+    Written to sa2_projections.csv for the forecasting work. load_vif supplies
+    the listing table's 2026-31 population growth from the same workbook.
+    """
+    path = cached_download(VIF_URL, cache_dir / "vif_sa2.xlsx")
+    out = None
+    for sheet, measures in VIF_PROJECTION_MEASURES.items():
+        d = read_vif_measures(path, sheet, measures)
+        out = d if out is None else out.merge(d, on=["sa2_code_2021", "year"], how="outer")
+    return out.sort_values(["sa2_code_2021", "year"]).reset_index(drop=True)
 
 # ---------------------------------------------------------------------
 # YEARLY SERIES (one row per SA2-year)
@@ -356,15 +486,65 @@ def personal_income_snapshot(income_yearly: pd.DataFrame, financial_year=PERSONA
         "income_earners": f"tax_income_earners_{suffix}",
     })
 
-def build_sa2_yearly(population_yearly: pd.DataFrame, income_yearly: pd.DataFrame):
+def load_building_approvals_yearly(cache_dir: Path):
+    """
+    Dwelling units approved per Victorian SA2 and financial year, one row per
+    SA2-year: every dwelling (`dwellings_approved`) and the houses among them
+    (`houses_approved`).
+
+    `year` is the calendar year the financial year ends in, the convention the
+    income series uses, so approvals from July 2024 to June 2025 share a row
+    with ERP at 30 June 2025. A financial year is kept once all twelve of its
+    months are published, so every figure is a full-year total.
+
+    The API response covers every Australian SA2 (about 20 MB) and is cached
+    as received. Delete the cached file to pick up newer months.
+    """
+    path = cached_download(
+        BUILDING_APPROVALS_URL, cache_dir / "abs_building_approvals_sa2.csv", timeout=300,
+    )
+    raw = pd.read_csv(
+        path, dtype=str, usecols=["BUILDING_TYPE", "REGION", "TIME_PERIOD", "OBS_VALUE"],
+    )
+    # Victorian SA2 codes start with 2. Codes 297... and 299... are the
+    # non-spatial SA2s (migratory, no usual address), which have no approvals.
+    raw = raw[raw["REGION"].str.fullmatch(r"2(?!9[79])\d{8}")]
+
+    month = pd.PeriodIndex(raw["TIME_PERIOD"], freq="M")
+    d = pd.DataFrame({
+        "sa2_code_2021": raw["REGION"].to_numpy(),
+        # Financial years run July to June: July 2024 belongs to year 2025.
+        "year": month.year + (month.month >= 7),
+        "month": month,
+        "measure": raw["BUILDING_TYPE"].map(BUILDING_APPROVALS_COLUMNS).to_numpy(),
+        "value": numeric(raw["OBS_VALUE"]).to_numpy(),
+    })
+    months_published = d.groupby("year")["month"].nunique()
+    d = d[d["year"].isin(months_published[months_published == 12].index)]
+
+    # min_count: a yearly total needs all twelve monthly values.
+    out = (
+        d.groupby(["sa2_code_2021", "year", "measure"])["value"].sum(min_count=12)
+        .unstack("measure")
+    )
+    out.columns.name = None
+    out = out[list(BUILDING_APPROVALS_COLUMNS.values())].reset_index()
+    return out.sort_values(["sa2_code_2021", "year"]).reset_index(drop=True)
+
+def build_sa2_yearly(*yearly_frames: pd.DataFrame):
     """
     Time-varying SA2 covariates for the forecasting model, one row per SA2-year.
     Kept apart from the listing table, which is a single snapshot.
     """
-    frames = [d for d in (population_yearly, income_yearly) if not d.empty]
+    frames = [d for d in yearly_frames if not d.empty]
     if not frames:
         return pd.DataFrame(columns=["sa2_code_2021", "year"])
     out = frames[0]
     for d in frames[1:]:
         out = out.merge(d, on=["sa2_code_2021", "year"], how="outer")
+    # The series cover different years, so a count is empty where its source
+    # has no figure. Nullable integers keep the counts whole in the CSV.
+    for c in ["erp", *BUILDING_APPROVALS_COLUMNS.values()]:
+        if c in out.columns:
+            out[c] = out[c].astype("Int64")
     return out.sort_values(["sa2_code_2021", "year"]).reset_index(drop=True)

@@ -36,20 +36,77 @@ or you need a quick run:
 python sprint_2/run/run.py --no-osm
 ```
 
+## Map of the listings
+
+`map_properties.py` draws where the listings are, on suburb boundaries, the
+granularity the analysis is done at. It reads the raw Domain listings, so it
+does not need the master table to have been built, and takes about 20 seconds:
+
+```bash
+python sprint_2/run/map_properties.py
+```
+
+Writes to `data/processed/maps/`:
+
+- `property_locations.html`: interactive map. One point per listing on a
+  street map, coloured by advertised weekly rent, with the ABS suburb (SAL)
+  boundaries on top. Hovering a listing shows its address, rent, type and
+  rooms; hovering a suburb shows its name, listing count and median rent. Open
+  it in a browser.
+- `property_locations.png`: the same points on the suburb boundaries, Victoria
+  beside Greater Melbourne.
+
+Things worth knowing:
+
+- **Rent is shown in five bands**, not on a continuous scale. `weekly_rent` is
+  not cleaned, and a few listings above $5,000 a week would flatten a
+  continuous scale. Listings with no rent, or a rent of 0, are grey.
+- **4 listings have no coordinates** and are left off.
+- **A suburb's count and median use the listing's Domain suburb**, the same
+  `(suburb, postcode)` match that gives the master table its `sal_code_2021`,
+  so they agree with the suburb-level analysis. 172 listings (1.4%) are drawn
+  just outside the suburb they are counted in, because they sit near a boundary
+  or carry a neighbouring suburb's name.
+- **The HTML embeds every listing's address and rent.** The Domain data must
+  not be redistributed, so the maps stay under the gitignored `data/`.
+- The suburb boundaries in the HTML are simplified to about 100 m to keep the
+  file under 10 MB, so at street level a boundary can sit slightly off its true
+  line.
+- The suburb match reads the mesh-block cache under `_cache/`. If the pipeline
+  has never run, the first map run downloads it (about 90 MB, an extra minute).
+- `simplify_coverage` needs geopandas 1.1 and shapely 2.1 or newer.
+
 ## Rent time series
 
 The Domain data is a single snapshot scraped 2025-09-09, so it has no rent time
 series. `fetch_sqm_rents.py` pulls the SQM Research Weekly Rents Index for every
-postcode in the Domain data (weekly, per postcode, 2009 to the current week),
-which is what bridges the snapshot to the present:
+Victorian postcode (weekly, per postcode, 2009 to the current week), which is
+what bridges the snapshot to the present:
 
 ```bash
-python sprint_2/run/fetch_sqm_rents.py            # all Domain postcodes, ~10 min
+python sprint_2/run/fetch_sqm_rents.py                  # every Victorian postcode, ~25 min
+python sprint_2/run/fetch_sqm_rents.py --missing-only   # postcodes the CSV does not hold yet
 python sprint_2/run/fetch_sqm_rents.py --postcodes 3168 3000
 ```
 
+The postcode list is the 694 Victorian postal areas in the mesh-block
+correspondence, so every suburb in `suburb_postcode_sa2.csv` can be given its
+postcode's series for the Q2 suburb ranking. SQM publishes a series for 668 of
+them, home to 99.9% of Victorian dwellings; 2,862 of the 2,944 suburbs have a
+series for their main postcode. The 26 postcodes with no series are small
+rural ones and are listed in the coverage audit.
+
+A run updates the CSV in place: the postcodes it fetches are replaced and every
+other postcode keeps the series it already had, so a failed request or a
+`--postcodes` run leaves the rest of the file intact.
+
+Series length varies. 469 postcodes have a rent in both 2021Q3 and 2026Q3, the
+five-year window, and 75 have under two years of weeks in total. Check
+`n_weeks` in the coverage audit before ranking a suburb on its postcode's
+growth.
+
 Writes `data/external/sqm_weekly_rents.csv` (long format) and a per-postcode
-coverage audit. Use it as a **growth index** anchored on the Domain snapshot;
+coverage audit, `sqm_postcode_coverage.csv`. Use it as a **growth index** anchored on the Domain snapshot;
 see `external_datasets.md` for the validation against the 2025-09 overlap. SQM data is free for reference use but must not be
 redistributed, so `data/` stays gitignored.
 
@@ -157,7 +214,11 @@ Core joins:
 - ABS SEIFA 2021
 - ABS Regional Population 2025, plus yearly SA2 population 2001-2025
 - ABS Personal Income by SA2, 2016-17 to 2022-23 (see "Yearly SA2 series" below)
-- Victoria in Future 2023
+- ABS Building Approvals by SA2, dwellings approved per financial year from
+  2021-22 (see "Yearly SA2 series" below)
+- Victoria in Future 2023: projected population growth on every listing, and
+  the population, dwelling, household and household-type projections to 2036
+  (see "SA2 projections" below)
 - Victorian school locations
 - DTP Public Transport Stops: train stations, tram stops and bus stops
 - OpenStreetMap amenities
@@ -175,8 +236,6 @@ values as exact SA2 measurements:
 - [School Zones](https://discover.data.vic.gov.au/dataset/?q=school+zones)
 - [PTV Timetable API](https://discover.data.vic.gov.au/dataset/ptv-timetable-api)
 - [Vicmap Features of Interest](https://discover.data.vic.gov.au/dataset/vicmap-features-of-interest-rest-api)
-- [ABS Building Approvals](https://www.abs.gov.au/statistics/industry/building-and-construction/building-approvals-australia/latest-release):
-  SA2 small-area approvals, a supply covariate for forecasting
 - [ABS CPI](https://www.abs.gov.au/statistics/economy/price-indexes-and-inflation/consumer-price-index-australia/latest-release):
   Melbourne rents, a Melbourne-wide time series, not an SA2 differentiator
 - [ASGS 2026](https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs/latest-release):
@@ -194,7 +253,8 @@ one column per piece of information:
   all restate those; the full ERP history is in `sa2_yearly.csv`.
 - **Victoria in Future:** `vif_population_growth_pct_2026_31`, the projected
   five-year change. The projected levels are near-copies of `erp_2025`, and the
-  2026-36 change correlates with the 2026-31 one at 0.99.
+  2026-36 change correlates with the 2026-31 one at 0.99. The levels for every
+  projection year are in `sa2_projections.csv`.
 - **Geography:** SA2 code and name, then SA3/SA4/GCCSA names only (each code
   maps one-to-one onto its name).
 - **Listing:** `secondary_type` is dropped because it equals `property_type` on
@@ -292,10 +352,12 @@ so no boundary conversion is needed.
 
 | column | meaning |
 |---|---|
-| `year` | population at 30 June of this year; income for the financial year ending in it (2022-23 → 2023) |
+| `year` | population at 30 June of this year; income and building approvals for the financial year ending in it (2022-23 → 2023) |
 | `erp`, `erp_growth_pct` | estimated resident population and its year-on-year change, 2001-2025 |
 | `income_earners`, `income_median`, `income_mean`, `income_sum`, `income_earners_median_age` | personal income from tax data, 2016-17 to 2022-23 |
 | `income_release` | which ABS release the income row came from |
+| `dwellings_approved` | dwelling units approved in the financial year, all building and work types, 2021-22 to 2025-26 |
+| `houses_approved` | the houses among them; the remainder is townhouses, apartments and dwellings created by conversions |
 
 - Income is three ABS releases stacked, each covering five years; the newest
   figure is kept where they overlap. Releases before 2020-21 use 2016
@@ -306,6 +368,40 @@ so no boundary conversion is needed.
   overlapping years. Those rows are labelled `2020-21 (rescaled)`.
 - Income values ABS does not publish (small SA2s) are left empty.
 - 2022-23 is also joined to every listing as the `tax_*_2022_23` columns.
+- Building approvals come from the ABS Data API dataflow `BA_SA2`, which
+  publishes monthly counts per SA2 from July 2021 on ASGS 2021 boundaries. The
+  months are summed to financial years, and a year is written once all twelve
+  of its months are published. Approvals for 2025-26 give the table a 2026
+  row, which has approvals only, until ABS publishes the 2026 population.
+- Approvals measure new supply on its way, since a dwelling is approved before
+  it is built. Divide by `erp` for a rate that is comparable across SA2s.
+- The API response is cached as `_cache/abs_building_approvals_sa2.csv`.
+  Delete that file to pick up newer months.
+
+## SA2 projections (`sa2_projections.csv`)
+
+Victoria in Future 2023 projects each SA2 forward in five-year steps. The
+forecasting model needs the projected levels as future values of its
+covariates, so they are written here with one row per SA2 and projection year
+(30 June 2021, 2026, 2031 and 2036; 2021 is the base year).
+
+| column | meaning |
+|---|---|
+| `vif_population` | estimated resident population |
+| `vif_persons_non_private_dwellings` | residents of aged care, student halls, hospitals and similar |
+| `vif_dwellings` | private dwellings, occupied or empty |
+| `vif_households` | occupied private dwellings |
+| `vif_households_couple_with_children`, `_couple_no_children`, `_one_parent`, `_other_family`, `_group`, `_lone_person` | households by type; the six sum to `vif_households` |
+
+- All 522 Victorian SA2s are covered, on the same ASGS 2021 boundaries as the
+  other tables, so the table joins to `sa2_yearly.csv` on `sa2_code_2021`.
+- The workbook's remaining measures follow from these columns. Average
+  household size is `(vif_population - vif_persons_non_private_dwellings) /
+  vif_households`, and the dwelling occupancy rate is `vif_households /
+  vif_dwellings`.
+- The projections are modelled values, so most are fractional.
+- Dwelling growth is the supply side of the rent forecast and household growth
+  the demand side.
 
 ## Outputs
 
@@ -313,9 +409,12 @@ so no boundary conversion is needed.
 - `vic_property_master.csv`: main listing-level table
 - `sa2_master.csv`: SA2-level table
 - `sa2_yearly.csv`: one row per SA2 and year, for the forecasting model
+- `sa2_projections.csv`: one row per SA2 and projection year, for the forecasting model
 - `suburb_postcode_sa2.csv`: dwelling shares linking suburbs, postcodes and SA2s
 - `vic_property_rent_ratios.csv`: rent-derived columns, not for use as predictors
 - `source_coverage.csv`: source-by-source join/status audit
+- `maps/property_locations.html`, `maps/property_locations.png`: where the
+  listings are (from `map_properties.py`)
 
 Temporary downloads are cached under `data/processed/_cache/`.
 

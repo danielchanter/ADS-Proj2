@@ -8,6 +8,7 @@ Output:
     output/vic_property_master.csv
     output/sa2_master.csv
     output/sa2_yearly.csv       one row per SA2-year, for forecasting
+    output/sa2_projections.csv  one row per SA2 and projection year, for forecasting
     output/suburb_postcode_sa2.csv   suburb x postcode x SA2 dwelling shares
     output/vic_property_rent_ratios.csv   target-derived columns, keyed on listing_id
     output/source_coverage.csv
@@ -22,7 +23,11 @@ Core enrichments:
   * ABS Regional Population 2025, plus the yearly SA2 series 2001-2025
   * ABS Personal Income, SA2, 2016-17 to 2022-23 (three releases stacked);
     2022-23 is joined to listings, every year goes to sa2_yearly.csv
-  * Victoria in Future 2023 SA2 projections to 2036
+  * ABS Building Approvals by SA2, dwellings approved per financial year from
+    2021-22, in sa2_yearly.csv
+  * Victoria in Future 2023 SA2 projections to 2036: population growth joined
+    to listings; population, dwelling, household and household-type levels in
+    sa2_projections.csv
   * Victorian School Locations 2025
   * DTP Public Transport Stops: train stations, tram stops and bus stops
   * Optional OpenStreetMap amenity counts/distances using Overpass
@@ -57,10 +62,10 @@ import pandas as pd
 
 from pipeline.common import DOMAIN_CSV, OUTPUT_DIR, record_source
 from pipeline.abs_sources import (
-    PERSONAL_INCOME_SNAPSHOT_YEAR, build_sa2_yearly, load_gcp,
-    load_personal_income_yearly, load_regional_population,
+    PERSONAL_INCOME_SNAPSHOT_YEAR, build_sa2_yearly, load_building_approvals_yearly,
+    load_gcp, load_personal_income_yearly, load_regional_population,
     load_regional_population_yearly, load_sa2, load_seifa, load_vif,
-    personal_income_snapshot,
+    load_vif_projections, personal_income_snapshot,
 )
 from pipeline.access import (
     STOP_MODES, add_osm_access, load_osm_amenities, load_schools,
@@ -115,6 +120,7 @@ def load_sa2_yearly(cache, coverage):
     yearly_sources = [
         ("ABS Regional Population 2001-2025 (yearly)", load_regional_population_yearly),
         ("ABS Personal Income 2016-17 to 2022-23 (yearly)", load_personal_income_yearly),
+        ("ABS Building Approvals by SA2 (yearly)", load_building_approvals_yearly),
     ]
     yearly_frames = []
     for name, loader in yearly_sources:
@@ -127,8 +133,30 @@ def load_sa2_yearly(cache, coverage):
             record_source(coverage, name, "failed", str(e))
             d = pd.DataFrame(columns=["sa2_code_2021", "year"])
         yearly_frames.append(d)
-    population_yearly, income_yearly = yearly_frames
-    return build_sa2_yearly(population_yearly, income_yearly), income_yearly
+    population_yearly, income_yearly, approvals_yearly = yearly_frames
+    return build_sa2_yearly(population_yearly, income_yearly, approvals_yearly), income_yearly
+
+
+def load_sa2_projections(cache, coverage):
+    """
+    Victoria in Future projection levels per SA2 and projection year, for the
+    forecasting model. A failure is recorded in the coverage audit and the run
+    continues.
+    """
+    name = "Victoria in Future 2023 projections"
+    try:
+        d = load_vif_projections(cache)
+        years = ", ".join(str(y) for y in sorted(d["year"].unique()))
+        record_source(
+            coverage, name, "joined",
+            f"sa2_projections.csv: {years}; {d['sa2_code_2021'].nunique()} SA2s, "
+            f"{d.shape[1] - 2} measures",
+        )
+    except Exception as e:
+        print(f"WARNING: {name} failed: {e}")
+        record_source(coverage, name, "failed", str(e))
+        d = pd.DataFrame(columns=["sa2_code_2021", "year"])
+    return d
 
 
 def build_sa2_master(sa2, income_yearly, cache, coverage):
@@ -199,10 +227,12 @@ def check_empty_columns(coverage, **frames):
                           f"all-empty columns: {', '.join(empty)}")
 
 
-def write_outputs(outdir, master, sa2_master, sa2_yearly, correspondence, rent_ratios, coverage):
+def write_outputs(outdir, master, sa2_master, sa2_yearly, sa2_projections, correspondence,
+                  rent_ratios, coverage):
     master.to_csv(outdir / "vic_property_master.csv", index=False)
     sa2_master.to_csv(outdir / "sa2_master.csv", index=False)
     sa2_yearly.to_csv(outdir / "sa2_yearly.csv", index=False)
+    sa2_projections.to_csv(outdir / "sa2_projections.csv", index=False)
     correspondence.to_csv(outdir / "suburb_postcode_sa2.csv", index=False)
     rent_ratios.to_csv(outdir / "vic_property_rent_ratios.csv", index=False)
     pd.DataFrame(coverage).to_csv(outdir / "source_coverage.csv", index=False)
@@ -216,6 +246,7 @@ def write_outputs(outdir, master, sa2_master, sa2_yearly, correspondence, rent_r
         print(f"Crime suburb-rate match rate: {master['crime_suburb_rate_per_1k'].notna().mean():.1%}")
     print(f"Columns: {len(master.columns)}")
     print(f"Wrote {len(sa2_yearly):,} SA2-year rows to {outdir/'sa2_yearly.csv'}")
+    print(f"Wrote {len(sa2_projections):,} SA2 projection rows to {outdir/'sa2_projections.csv'}")
 
 
 def main():
@@ -234,6 +265,7 @@ def main():
 
     # 2. Area-level sources -------------------------------------------
     sa2_yearly, income_yearly = load_sa2_yearly(cache, coverage)
+    sa2_projections = load_sa2_projections(cache, coverage)
     sa2_master = build_sa2_master(sa2, income_yearly, cache, coverage)
 
     # 3. Schools, stations, tram and bus stops ------------------------
@@ -318,7 +350,8 @@ def main():
 
     # 8. Outputs -------------------------------------------------------
     check_empty_columns(coverage, sa2_master=sa2_master, vic_property_master=master)
-    write_outputs(outdir, master, sa2_master, sa2_yearly, correspondence, rent_ratios, coverage)
+    write_outputs(outdir, master, sa2_master, sa2_yearly, sa2_projections, correspondence,
+                  rent_ratios, coverage)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ RUN_DIR = Path(__file__).resolve().parent.parent
 SPRINT_DIR = RUN_DIR.parent
 REPO_DIR = SPRINT_DIR.parent
 
-# The supplied Domain snapshot. fetch_sqm_rents.py reads its postcodes from it.
+# The supplied Domain snapshot.
 DOMAIN_CSV = REPO_DIR / "domain" / "Data" / "vic_rentals_all.csv"
 OUTPUT_DIR = SPRINT_DIR / "data" / "processed"
 EXTERNAL_DIR = REPO_DIR / "data" / "external"
@@ -91,6 +91,31 @@ def arcgis_query_paged(url, where="1=1", out_fields="*", order_by=None, page_siz
             break
         offset += len(features)
     return pd.DataFrame(rows)
+
+def arcgis_geojson_paged(url, order_by, where="1=1", out_fields="*", page_size=2000):
+    """
+    arcgis_geojson for a layer too big for one response, following the paging
+    the same way arcgis_query_paged does. Paging needs a fixed order, so
+    order_by is required.
+    """
+    features = []
+    while True:
+        params = {
+            "where": where,
+            "outFields": out_fields,
+            "orderByFields": order_by,
+            "f": "geojson",
+            "outSR": 4326,
+            "resultOffset": len(features),
+            "resultRecordCount": page_size,
+        }
+        r = requests.get(url, params=params, timeout=300)
+        r.raise_for_status()
+        page = r.json()["features"]
+        features.extend(page)
+        if len(page) < page_size:
+            break
+    return gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
 
 # ---------------------------------------------------------------------
 # KEYS AND COLUMNS
