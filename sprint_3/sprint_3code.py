@@ -9,10 +9,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 
-
-# ============================================================
 # 1. LOAD DATA
-# ============================================================
 
 df = pd.read_csv("vic_property_master.csv")
 
@@ -34,16 +31,11 @@ df = df[
 print("Rows:", len(df))
 print("Columns:", len(df.columns))
 
-
-# ============================================================
 # 2. READABLE FEATURE NAMES
-# ============================================================
 
 pretty_names = {
 
-    # ----------------------------
     # PROPERTY / GEOGRAPHICAL
-    # ----------------------------
 
     "lat": "Latitude",
     "lon": "Longitude",
@@ -83,10 +75,7 @@ pretty_names = {
     "osm_shopping_centre_count": "Nearby shopping centres",
     "osm_supermarket_count": "Nearby supermarkets",
 
-
-    # ----------------------------
     # SOCIOECONOMIC
-    # ----------------------------
 
     "census_median_age": "Median age",
     "census_population_2021": "Population (2021)",
@@ -172,19 +161,13 @@ pretty_names = {
     "vif_population_growth_pct_2026_36":
         "Forecast population growth (2026–36)",
 
-
-    # ----------------------------
     # MISCELLANEOUS
-    # ----------------------------
 
     "days_listed":
         "Days listed"
 }
 
-
-# ============================================================
 # 3. GEOGRAPHICAL + PROPERTY FEATURES
-# ============================================================
 
 geo_property_features = [
 
@@ -228,10 +211,7 @@ geo_property_features = [
     "osm_supermarket_count"
 ]
 
-
-# ============================================================
 # 4. SOCIOECONOMIC FEATURES
-# ============================================================
 
 socioeconomic_features = [
 
@@ -277,10 +257,7 @@ socioeconomic_features = [
     "vif_population_growth_pct_2026_36"
 ]
 
-
-# ============================================================
 # 5. MISCELLANEOUS FEATURES
-# ============================================================
 
 # available_date and date_listed are dates rather than simple
 # numerical predictors, and URL is an identifier.
@@ -291,10 +268,7 @@ misc_features = [
     "days_listed"
 ]
 
-
-# ============================================================
 # 6. REMOVE FEATURES THAT DO NOT EXIST
-# ============================================================
 
 def existing_features(feature_list):
 
@@ -328,10 +302,7 @@ misc_features = existing_features(
     misc_features
 )
 
-
-# ============================================================
 # 7. CREATE THE THREE FEATURE SETS
-# ============================================================
 
 geo_model_features = (
     geo_property_features
@@ -365,10 +336,7 @@ print(
     len(all_model_features)
 )
 
-
-# ============================================================
 # 8. MODEL FUNCTION
-# ============================================================
 
 def run_models(features, model_name):
 
@@ -377,9 +345,7 @@ def run_models(features, model_name):
     print(model_name.upper())
     print("=" * 70)
 
-    # --------------------------------------------------------
     # DATA
-    # --------------------------------------------------------
 
     X = df[features].copy()
     y = df[target].copy()
@@ -422,10 +388,7 @@ def run_models(features, model_name):
         X.median()
     )
 
-
-    # --------------------------------------------------------
     # TRAIN / TEST SPLIT
-    # --------------------------------------------------------
 
     X_train, X_test, y_train, y_test = (
         train_test_split(
@@ -436,10 +399,7 @@ def run_models(features, model_name):
         )
     )
 
-
-    # ========================================================
     # EXTRA TREES
-    # ========================================================
 
     extra = ExtraTreesRegressor(
         n_estimators=300,
@@ -476,10 +436,7 @@ def run_models(features, model_name):
         f"R²: {extra_r2:.3f}"
     )
 
-
-    # --------------------------------------------------------
     # EXTRA TREES IMPORTANCE
-    # --------------------------------------------------------
 
     extra_importance = pd.DataFrame({
         "feature": X.columns,
@@ -518,10 +475,7 @@ def run_models(features, model_name):
         ].head(10)
     )
 
-
-    # --------------------------------------------------------
     # EXTRA TREES GRAPH
-    # --------------------------------------------------------
 
     extra_top10 = (
         extra_importance
@@ -553,10 +507,7 @@ def run_models(features, model_name):
     plt.tight_layout()
     plt.show()
 
-
-    # ========================================================
     # RIDGE
-    # ========================================================
 
     alphas = np.logspace(
         -3,
@@ -615,10 +566,7 @@ def run_models(features, model_name):
         ].alpha_
     )
 
-
-    # --------------------------------------------------------
     # RIDGE COEFFICIENTS
-    # --------------------------------------------------------
 
     ridge_results = pd.DataFrame({
 
@@ -669,10 +617,7 @@ def run_models(features, model_name):
         ].head(10)
     )
 
-
-    # --------------------------------------------------------
     # RIDGE GRAPH
-    # --------------------------------------------------------
 
     ridge_top10 = (
         ridge_results
@@ -710,9 +655,7 @@ def run_models(features, model_name):
     plt.show()
 
 
-    # --------------------------------------------------------
     # RETURN RESULTS
-    # --------------------------------------------------------
 
     return {
         "extra_mae": extra_mae,
@@ -728,20 +671,14 @@ def run_models(features, model_name):
             ridge_results
     }
 
-
-# ============================================================
-# 9. GEOGRAPHICAL + PROPERTY MODEL
-# ============================================================
+# GEOGRAPHICAL + PROPERTY MODEL
 
 geo_results = run_models(
     geo_model_features,
     "Geographical + Property Features"
 )
 
-
-# ============================================================
-# 10. SOCIOECONOMIC MODEL
-# ============================================================
+# SOCIOECONOMIC MODEL
 
 socio_results = run_models(
     socio_model_features,
@@ -749,19 +686,14 @@ socio_results = run_models(
 )
 
 
-# ============================================================
-# 11. ALL FEATURES MODEL
-# ============================================================
+# ALL FEATURES MODE
 
 all_results = run_models(
     all_model_features,
     "All Features"
 )
 
-
-# ============================================================
-# 12. COMPARE MODEL PERFORMANCE
-# ============================================================
+# COMPARE MODEL PERFORMANCE
 
 performance = pd.DataFrame({
 
