@@ -617,23 +617,52 @@ def run_models(features, model_name):
         ].head(10)
     )
 
-    # RIDGE GRAPH
+        # ========================================================
+    # RIDGE GRAPH 1: ABSOLUTE FEATURE IMPORTANCE
+    # ========================================================
 
     ridge_top10 = (
         ridge_results
         .head(10)
-        .sort_values(
-            "coefficient"
-        )
+        .sort_values("importance")
     )
 
-    plt.figure(
-        figsize=(10, 6)
-    )
+    plt.figure(figsize=(10, 6))
 
     plt.barh(
         ridge_top10["label"],
-        ridge_top10["coefficient"]
+        ridge_top10["importance"]
+    )
+
+    plt.xlabel(
+        "Absolute Standardised Ridge Coefficient"
+    )
+
+    plt.ylabel("")
+
+    plt.title(
+        f"{model_name}: Ridge Feature Importance"
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+
+    # ========================================================
+    # RIDGE GRAPH 2: POSITIVE / NEGATIVE COEFFICIENTS
+    # ========================================================
+
+    ridge_direction = (
+        ridge_results
+        .head(10)
+        .sort_values("coefficient")
+    )
+
+    plt.figure(figsize=(10, 6))
+
+    plt.barh(
+        ridge_direction["label"],
+        ridge_direction["coefficient"]
     )
 
     plt.axvline(
@@ -648,27 +677,21 @@ def run_models(features, model_name):
     plt.ylabel("")
 
     plt.title(
-        f"{model_name}: Ridge Regression"
+        f"{model_name}: Ridge Coefficient Direction"
     )
 
     plt.tight_layout()
     plt.show()
-
 
     # RETURN RESULTS
 
     return {
         "extra_mae": extra_mae,
         "extra_r2": extra_r2,
-
         "ridge_mae": ridge_mae,
         "ridge_r2": ridge_r2,
-
-        "extra_importance":
-            extra_importance,
-
-        "ridge_results":
-            ridge_results
+        "extra_importance": extra_importance,
+        "ridge_results": ridge_results
     }
 
 # GEOGRAPHICAL + PROPERTY MODEL
