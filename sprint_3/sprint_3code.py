@@ -3,23 +3,32 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.linear_model import RidgeCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
+
+
+# ============================================================
+# 1. LOAD DATA
+# ============================================================
 
 df = pd.read_csv("vic_property_master.csv")
 
 print("Shape:", df.shape)
-print(df.head())
 
 target = "weekly_rent"
 
-# Make sure rent is numeric
-df[target] = pd.to_numeric(df[target], errors="coerce")
+df[target] = pd.to_numeric(
+    df[target],
+    errors="coerce"
+)
 
 # Remove missing rent
 df = df.dropna(subset=[target])
 
-# Remove clearly unrealistic rent values
+# Remove unrealistic rent values
 df = df[
     (df[target] >= 100) &
     (df[target] <= 5000)
@@ -27,29 +36,56 @@ df = df[
 
 print("Rows after cleaning:", len(df))
 
-numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
 
-# Remove target
-features = [col for col in numeric_cols if col != target]
+# ============================================================
+# 2. SELECT NUMERIC FEATURES
+# ============================================================
 
-# Remove target leakage
-leakage_features = [
+numeric_cols = df.select_dtypes(
+    include=np.number
+).columns.tolist()
+
+features = [
+    col for col in numeric_cols
+    if col != target
+]
+
+
+# ============================================================
+# 3. REMOVE UNSUITABLE FEATURES
+# ============================================================
+
+# Variables that either contain information derived from rent,
+# are identifiers, or are too directly related to rent
+exclude_features = [
     "rent_per_bedroom",
     "rent_vs_2021_census_median",
-    "rent_to_area_median_hh_income_pct"
+    "rent_to_area_median_hh_income_pct",
+    "listing_id",
+    "bond"
 ]
 
 features = [
     col for col in features
-    if col not in leakage_features
+    if col not in exclude_features
 ]
 
-# Remove duplicate SEIFA representations
+
+# ============================================================
+# 4. REMOVE DUPLICATE SEIFA REPRESENTATIONS
+# ============================================================
+
+# Keep the actual scores rather than score + percentile + decile
+
 duplicate_features = [
     "irsad_aus_percentile",
     "irsad_aus_decile",
     "ieo_aus_percentile",
-    "ieo_aus_decile"
+    "ieo_aus_decile",
+    "irsd_aus_percentile",
+    "irsd_aus_decile",
+    "ier_aus_percentile",
+    "ier_aus_decile"
 ]
 
 features = [
@@ -57,31 +93,151 @@ features = [
     if col not in duplicate_features
 ]
 
-# Keep only most recent personal income
-most_recent_income = "tax_mean_total_personal_income_2022_23"
+
+# ============================================================
+# 5. KEEP ONLY MOST RECENT PERSONAL INCOME
+# ============================================================
+
+most_recent_income = (
+    "tax_mean_total_personal_income_2022_23"
+)
 
 income_cols = [
     col for col in features
-    if "mean_total_personal_income" in col
+    if "tax_mean_total_personal_income" in col
 ]
 
 features = [
     col for col in features
-    if col not in income_cols or col == most_recent_income
+    if col not in income_cols
+    or col == most_recent_income
 ]
 
 print("Number of features:", len(features))
-print("Personal income feature kept:", most_recent_income)
+print(
+    "Personal income feature kept:",
+    most_recent_income
+)
 
+
+# ============================================================
+# 6. READABLE FEATURE NAMES
+# ============================================================
+
+pretty_names = {
+
+    # Property
+    "bedrooms":
+        "Bedrooms",
+
+    "bathrooms":
+        "Bathrooms",
+
+    "carspaces":
+        "Car spaces",
+
+    "days_listed":
+        "Days listed",
+
+
+    # Housing market
+    "census_median_rent_weekly":
+        "Area median rent",
+
+    "census_median_mortgage_monthly":
+        "Area median mortgage",
+
+
+    # Income
+    "tax_mean_total_personal_income_2022_23":
+        "Mean personal income",
+
+    "census_median_personal_income_weekly":
+        "Median personal income",
+
+
+    # Socioeconomic
+    "irsad_score":
+        "Socioeconomic advantage",
+
+    "irsd_score":
+        "Socioeconomic disadvantage",
+
+    "ieo_score":
+        "Education & occupation",
+
+    "ier_score":
+        "Economic resources",
+
+
+    # Demographics
+    "census_avg_household_size":
+        "Average household size",
+
+    "census_median_age":
+        "Median age",
+
+    "population_density_2025":
+        "Population density",
+
+    "born_overseas_pct":
+        "Born overseas (%)",
+
+    "age_0_14_pct":
+        "Population aged 0–14 (%)",
+
+
+    # Accessibility
+    "nearest_park_km":
+        "Distance to park",
+
+    "nearest_school_km":
+        "Distance to school",
+
+    "nearest_gp_clinic_km":
+        "Distance to GP clinic",
+
+    "nearest_train_station_km":
+        "Distance to train station",
+
+    "nearest_supermarket_km":
+        "Distance to supermarket",
+
+
+    # Amenities
+    "osm_cafe_count":
+        "Nearby cafes",
+
+
+    # Location
+    "lat":
+        "Latitude",
+
+    "lon":
+        "Longitude"
+}
+
+
+# ============================================================
+# 7. CREATE X AND y
+# ============================================================
 
 X = df[features].copy()
 y = df[target]
 
-# Replace infinite values
-X = X.replace([np.inf, -np.inf], np.nan)
+X = X.replace(
+    [np.inf, -np.inf],
+    np.nan
+)
 
-# Fill missing values with median
-X = X.fillna(X.median())
+X = X.fillna(
+    X.median()
+)
+
+
+# ============================================================
+# 8. TRAIN / TEST SPLIT
+# ============================================================
 
 X_train, X_test, y_train, y_test = train_test_split(
     X,
@@ -90,23 +246,45 @@ X_train, X_test, y_train, y_test = train_test_split(
     random_state=42
 )
 
+
+# ============================================================
+# EXTRA TREES
+# ============================================================
+
 model = ExtraTreesRegressor(
     n_estimators=300,
     random_state=42,
     n_jobs=-1
 )
 
-model.fit(X_train, y_train)
+model.fit(
+    X_train,
+    y_train
+)
 
-predictions = model.predict(X_test)
+predictions = model.predict(
+    X_test
+)
 
-mae = mean_absolute_error(y_test, predictions)
-r2 = r2_score(y_test, predictions)
+mae = mean_absolute_error(
+    y_test,
+    predictions
+)
 
-print("\nModel Performance")
-print("-----------------")
+r2 = r2_score(
+    y_test,
+    predictions
+)
+
+print("\nExtra Trees Performance")
+print("-----------------------")
 print(f"MAE: ${mae:.2f}")
 print(f"R²: {r2:.3f}")
+
+
+# ============================================================
+# EXTRA TREES FEATURE IMPORTANCE
+# ============================================================
 
 importance = pd.DataFrame({
     "feature": X.columns,
@@ -118,266 +296,231 @@ importance = importance.sort_values(
     ascending=False
 ).reset_index(drop=True)
 
-print("\nTop 20 Features")
-print("-----------------")
-print(importance.head(20))
 
-top20 = importance.head(20).sort_values(
+print("\nTop 10 Extra Trees Features")
+print("---------------------------")
+
+print(
+    importance.head(10)
+)
+
+
+# ============================================================
+# READABLE EXTRA TREES GRAPH
+# ============================================================
+
+top10 = importance.head(10).copy()
+
+top10["label"] = (
+    top10["feature"]
+    .map(pretty_names)
+    .fillna(top10["feature"])
+)
+
+top10 = top10.sort_values(
     "importance",
     ascending=True
 )
 
-plt.figure(figsize=(10, 8))
+plt.figure(figsize=(10, 6))
 
 plt.barh(
-    top20["feature"],
-    top20["importance"]
+    top10["label"],
+    top10["importance"]
 )
 
 plt.xlabel("Feature Importance")
-plt.ylabel("Feature")
-plt.title("Top 20 Features for Predicting Weekly Rent")
+plt.ylabel("")
+
+plt.title(
+    "Most Important Features for Predicting Weekly Rent"
+)
 
 plt.tight_layout()
 plt.show()
 
 
-X = df[features].copy()
-y = df[target]
+# ============================================================
+# RIDGE REGRESSION
+# ============================================================
 
-X = X.replace([np.inf, -np.inf], np.nan)
-X = X.fillna(X.median())
-
-from sklearn.linear_model import RidgeCV
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, r2_score
-
-# --------------------------------------------------
-# TRAIN / TEST SPLIT
-# --------------------------------------------------
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=42
+alphas = np.logspace(
+    -3,
+    3,
+    100
 )
 
-
-# --------------------------------------------------
-# RIDGE REGRESSION
-# --------------------------------------------------
-
-# Try different strengths of regularisation
-alphas = np.logspace(-3, 3, 100)
-
 ridge = Pipeline([
-    ("scaler", StandardScaler()),
-    ("ridge", RidgeCV(alphas=alphas))
+    (
+        "scaler",
+        StandardScaler()
+    ),
+    (
+        "ridge",
+        RidgeCV(
+            alphas=alphas
+        )
+    )
 ])
 
-ridge.fit(X_train, y_train)
+ridge.fit(
+    X_train,
+    y_train
+)
 
+ridge_predictions = ridge.predict(
+    X_test
+)
 
-# --------------------------------------------------
-# MODEL PERFORMANCE
-# --------------------------------------------------
+ridge_mae = mean_absolute_error(
+    y_test,
+    ridge_predictions
+)
 
-predictions = ridge.predict(X_test)
-
-mae = mean_absolute_error(y_test, predictions)
-r2 = r2_score(y_test, predictions)
+ridge_r2 = r2_score(
+    y_test,
+    ridge_predictions
+)
 
 print("\nRidge Regression Performance")
 print("----------------------------")
-print(f"MAE: ${mae:.2f}")
-print(f"R²: {r2:.3f}")
+print(f"MAE: ${ridge_mae:.2f}")
+print(f"R²: {ridge_r2:.3f}")
 
 print(
-    f"Best alpha: "
-    f"{ridge.named_steps['ridge'].alpha_:.4f}"
+    "Best alpha:",
+    ridge.named_steps["ridge"].alpha_
 )
 
 
-# --------------------------------------------------
-# FEATURE COEFFICIENTS
-# --------------------------------------------------
+# ============================================================
+# RIDGE COEFFICIENTS
+# ============================================================
 
-coefficients = pd.DataFrame({
-    "feature": X.columns,
-    "coefficient": ridge.named_steps["ridge"].coef_
+ridge_coefficients = pd.DataFrame({
+    "feature":
+        X.columns,
+
+    "coefficient":
+        ridge.named_steps["ridge"].coef_
 })
 
-# Absolute coefficient tells us strength
-coefficients["importance"] = coefficients[
-    "coefficient"
-].abs()
+ridge_coefficients["importance"] = (
+    ridge_coefficients[
+        "coefficient"
+    ].abs()
+)
 
-coefficients = coefficients.sort_values(
-    "importance",
-    ascending=False
-).reset_index(drop=True)
+ridge_coefficients = (
+    ridge_coefficients
+    .sort_values(
+        "importance",
+        ascending=False
+    )
+    .reset_index(drop=True)
+)
 
 
-# --------------------------------------------------
-# TOP 20 FEATURES
-# --------------------------------------------------
-
-print("\nTop 20 Ridge Features")
+print("\nTop 10 Ridge Features")
 print("---------------------")
 
 print(
-    coefficients[
-        ["feature", "coefficient", "importance"]
-    ].head(20)
+    ridge_coefficients[
+        [
+            "feature",
+            "coefficient",
+            "importance"
+        ]
+    ].head(10)
 )
 
 
-# --------------------------------------------------
-# PLOT TOP 20
-# --------------------------------------------------
+# ============================================================
+# READABLE RIDGE GRAPH
+# ============================================================
 
-top20 = coefficients.head(20).sort_values(
+ridge_top10 = (
+    ridge_coefficients
+    .head(10)
+    .copy()
+)
+
+ridge_top10["label"] = (
+    ridge_top10["feature"]
+    .map(pretty_names)
+    .fillna(
+        ridge_top10["feature"]
+    )
+)
+
+ridge_top10 = ridge_top10.sort_values(
     "importance",
     ascending=True
 )
 
-plt.figure(figsize=(10, 8))
+plt.figure(figsize=(10, 6))
 
 plt.barh(
-    top20["feature"],
-    top20["importance"]
+    ridge_top10["label"],
+    ridge_top10["importance"]
 )
 
-plt.xlabel("Absolute Standardised Ridge Coefficient")
-plt.ylabel("Feature")
-plt.title("Top 20 Features for Predicting Weekly Rent - Ridge")
+plt.xlabel(
+    "Absolute Standardised Ridge Coefficient"
+)
+
+plt.ylabel("")
+
+plt.title(
+    "Most Important Features for Predicting Weekly Rent - Ridge"
+)
 
 plt.tight_layout()
 plt.show()
 
-from sklearn.linear_model import LassoCV
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, r2_score
+# ============================================================
+# RIDGE GRAPH WITH DIRECTION
+# ============================================================
 
-# --------------------------------------------------
-# TRAIN / TEST SPLIT
-# --------------------------------------------------
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=42
+ridge_top10 = (
+    ridge_coefficients
+    .head(10)
+    .copy()
 )
 
+ridge_top10["label"] = (
+    ridge_top10["feature"]
+    .map(pretty_names)
+    .fillna(ridge_top10["feature"])
+)
 
-# --------------------------------------------------
-# LASSO REGRESSION
-# --------------------------------------------------
-
-lasso = Pipeline([
-    ("scaler", StandardScaler()),
-    ("lasso", LassoCV(
-        alphas=np.logspace(-3, 3, 100),
-        cv=5,
-        max_iter=10000
-    ))
-])
-
-lasso.fit(X_train, y_train)
-
-
-# --------------------------------------------------
-# MODEL PERFORMANCE
-# --------------------------------------------------
-
-predictions = lasso.predict(X_test)
-
-mae = mean_absolute_error(y_test, predictions)
-r2 = r2_score(y_test, predictions)
-
-print("\nLasso Regression Performance")
-print("----------------------------")
-print(f"MAE: ${mae:.2f}")
-print(f"R²: {r2:.3f}")
-print(f"Best alpha: {lasso.named_steps['lasso'].alpha_:.4f}")
-
-
-# --------------------------------------------------
-# FEATURE COEFFICIENTS
-# --------------------------------------------------
-
-coefficients = pd.DataFrame({
-    "feature": X.columns,
-    "coefficient": lasso.named_steps["lasso"].coef_
-})
-
-# Absolute coefficient = feature importance
-coefficients["importance"] = coefficients[
+# Sort by actual coefficient
+ridge_top10 = ridge_top10.sort_values(
     "coefficient"
-].abs()
-
-coefficients = coefficients.sort_values(
-    "importance",
-    ascending=False
-).reset_index(drop=True)
-
-
-# --------------------------------------------------
-# SELECTED FEATURES
-# --------------------------------------------------
-
-selected = coefficients[
-    coefficients["coefficient"] != 0
-].copy()
-
-removed = coefficients[
-    coefficients["coefficient"] == 0
-].copy()
-
-print("\nFeatures selected by Lasso:")
-print("---------------------------")
-print(selected[["feature", "coefficient"]])
-
-print("\nNumber of features selected:", len(selected))
-print("Number of features removed:", len(removed))
-
-
-# --------------------------------------------------
-# FEATURES REMOVED BY LASSO
-# --------------------------------------------------
-
-print("\nFeatures removed by Lasso:")
-print("--------------------------")
-
-for feature in removed["feature"]:
-    print(feature)
-
-
-# --------------------------------------------------
-# TOP 20 FEATURES
-# --------------------------------------------------
-
-top20 = selected.head(20).sort_values(
-    "importance",
-    ascending=True
 )
 
-plt.figure(figsize=(10, 8))
+plt.figure(figsize=(10, 6))
 
 plt.barh(
-    top20["feature"],
-    top20["importance"]
+    ridge_top10["label"],
+    ridge_top10["coefficient"]
 )
 
-plt.xlabel("Absolute Standardised Lasso Coefficient")
-plt.ylabel("Feature")
-plt.title("Top 20 Features for Predicting Weekly Rent - Lasso")
+# Zero line
+plt.axvline(
+    x=0,
+    linewidth=1
+)
+
+plt.xlabel(
+    "Standardised Ridge Coefficient"
+)
+
+plt.ylabel("")
+
+plt.title(
+    "Relationship Between Key Features and Weekly Rent"
+)
 
 plt.tight_layout()
 plt.show()
